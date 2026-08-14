@@ -63,7 +63,7 @@ marketplace, the same pattern upstream uses. Run
 
 ### Preservation — the layer everything else sits on
 
-Five tools in `bin/`, all read-only or additive:
+Six tools in `bin/`, all read-only or additive:
 
 | Tool | What it does |
 |---|---|
@@ -72,6 +72,7 @@ Five tools in `bin/`, all read-only or additive:
 | `warrior-protect` | Gives an unprotected repository a real, *verified* home on a git server — verified by checking the server's own refs, never by trusting an exit code |
 | `warrior-classify` | Works out what each repository on your server is *for* — your own code, a mirror of someone else's, an archive — and records it |
 | `warrior-credits` | Live credit/quota balance across every AI harness you run, at zero token cost, without spending a prompt to ask |
+| `warrior-server-status` | Is your git forge actually healthy right now — reachability, disk headroom, mirror staleness, backup freshness — not just whether it answers HTTP 200 |
 
 `warrior-scan` has had the full adversarial treatment — three independent
 agents trying to break it, live, against real repositories — and found four

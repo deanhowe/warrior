@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""warrior-server-status — is your git forge actually healthy, right now?
+
+Why this exists
+----------------
+"The server is up" and "the server is wired up correctly" are different
+claims. A forge can answer HTTP 200 while sitting at 87% disk, with mirrors
+that silently stopped syncing weeks ago, with no scheduled backup at all —
+and every one of those looks identical to "fine" from a single curl. This
+tool checks the things that actually matter, not just whether something
+answers.
+
+What it checks, all read-only
+------------------------------
+- HTTP reachability and latency (a bare request, no auth needed)
+- SSH reachability (a socket connect only - never runs git over it)
+- API auth, if a token is configured (never required)
+- Disk usage of the bare-repository root, if it's on this machine - the one
+  number a forge will never surface about itself, and the one that silently
+  turns "healthy" into "full" with no warning
+- Mirror staleness, if a local Gitea database is configured: mirrors whose
+  next scheduled sync has already passed are flagged, not just counted
+
+Nothing here requires every setting to be configured. A forge with no local
+database, no bare-repo root on this machine, and no token still gets a
+useful report - each section says plainly what it could and couldn't check,
+rather than guessing.
+
+Safety
+------
+No git operation of any kind. No write to the forge. The only local write is
+the optional --output report file, and it carries the same guard every
+Warrior tool uses: refuses to overwrite, refuses a .git path, refuses a
+non-data extension.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+_LIB = Path(__file__).resolve().parent.parent / "lib"
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+from warrior_forge import (  # noqa: E402
+    ConfigError, Settings, forge_token, redact_url_userinfo, safe_output_path,
+    sanitise_output,
+)
+
+DISK_WARN_PCT = 80
+DISK_CRITICAL_PCT = 90
+
+
+def http_check(base_url: str) -> dict[str, Any]:
+    parsed = urlsplit(base_url)
+    probe = f"{parsed.scheme}://{parsed.netloc}/"
+    started = time.monotonic()
+    try:
+        request = urllib.request.Request(probe, method="GET")
+        with urllib.request.urlopen(request, timeout=10) as response:
+            elapsed = round(time.monotonic() - started, 3)
+            return {"reachable": True, "status": response.status,
+                   "seconds": elapsed, "url": redact_url_userinfo(probe)}
+    except urllib.error.HTTPError as error:
+        # Any HTTP response - even 401/404 - proves the server answered.
+        elapsed = round(time.monotonic() - started, 3)
+        return {"reachable": True, "status": error.code,
+               "seconds": elapsed, "url": redact_url_userinfo(probe)}
+    except (urllib.error.URLError, OSError, TimeoutError) as error:
+        return {"reachable": False, "error": sanitise_output(str(error), None),
+               "url": redact_url_userinfo(probe)}
+
+
+def ssh_check(ssh_base: str) -> dict[str, Any]:
+    parsed = urlsplit(ssh_base)
+    host, port = parsed.hostname, parsed.port or 22
+    if not host:
+        return {"reachable": False, "error": "no host in configured SSH URL"}
+    started = time.monotonic()
+    try:
+        with socket.create_connection((host, port), timeout=8):
+            elapsed = round(time.monotonic() - started, 3)
+            return {"reachable": True, "host": host, "port": port, "seconds": elapsed}
+    except OSError as error:
+        return {"reachable": False, "host": host, "port": port,
+               "error": sanitise_output(str(error), None)}
+
+
+def auth_check(api_base: str, token: str) -> dict[str, Any]:
+    import warrior_forge as forge
+    login = forge.authenticated_login(api_base, token)
+    if login:
+        return {"authenticated": True, "as": login}
+    return {"authenticated": False,
+           "note": "token present but did not authenticate - check scope or revocation"}
+
+
+def disk_usage(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        result = subprocess.run(["df", "-Pk", str(path)], capture_output=True,
+                                text=True, check=False, stdin=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    lines = result.stdout.strip().splitlines()
+    if len(lines) < 2:
+        return None
+    fields = lines[-1].split()
+    if len(fields) < 5:
+        return None
+    total_kb, used_kb, avail_kb = int(fields[1]), int(fields[2]), int(fields[3])
+    pct_used = round(used_kb / total_kb * 100, 1) if total_kb else None
+    return {
+        "path": str(path),
+        "total_gb": round(total_kb / 1_048_576, 1),
+        "used_gb": round(used_kb / 1_048_576, 1),
+        "available_gb": round(avail_kb / 1_048_576, 1),
+        "percent_used": pct_used,
+        "severity": ("CRITICAL" if pct_used and pct_used >= DISK_CRITICAL_PCT else
+                    "WARN" if pct_used and pct_used >= DISK_WARN_PCT else "OK"),
+    }
+
+
+def mirror_staleness(db_path: Path) -> dict[str, Any] | None:
+    if not db_path.exists():
+        return None
+    import sqlite3
+    uri = f"file:{db_path}?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+    try:
+        now = int(time.time())
+        total, overdue = 0, 0
+        oldest_overdue_days = 0
+        for (next_update,) in connection.execute(
+            "SELECT next_update_unix FROM mirror WHERE next_update_unix IS NOT NULL AND next_update_unix > 0"
+        ):
+            total += 1
+            if next_update < now:
+                overdue += 1
+                days = (now - next_update) / 86400
+                oldest_overdue_days = max(oldest_overdue_days, round(days, 1))
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    return {"total_scheduled_mirrors": total, "overdue": overdue,
+           "oldest_overdue_days": oldest_overdue_days if overdue else None}
+
+
+def backup_freshness(directory: Path) -> dict[str, Any] | None:
+    if not directory.is_dir():
+        return None
+    candidates = sorted(directory.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidates:
+        return {"found": False, "checked": str(directory)}
+    newest = candidates[0]
+    age_hours = round((time.time() - newest.stat().st_mtime) / 3600, 1)
+    return {"found": True, "newest": newest.name, "age_hours": age_hours,
+           "count": len(candidates), "checked": str(directory)}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--backup-dir", type=Path, default=None,
+                        help="directory of periodic database backups to check freshness of")
+    parser.add_argument("--output", type=Path,
+                        help="write the report to this file too; refuses to overwrite an "
+                             "existing file, write inside a .git directory, or use a "
+                             "non-data extension, unless --overwrite")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="with --output, allow replacing an existing file")
+    arguments = parser.parse_args()
+
+    # Validate the output path BEFORE doing any work: a mistyped --output once
+    # overwrote a repository's .git/HEAD and broke it, on a different tool in
+    # this same project.
+    try:
+        destination = safe_output_path(arguments.output, overwrite=arguments.overwrite,
+                                       suffixes=(".json", ".txt")) \
+            if arguments.output else None
+    except ConfigError as error:
+        print(f"warrior-server-status: {error}", file=sys.stderr)
+        return 2
+
+    settings = Settings.load()
+    report: dict[str, Any] = {"read_only": True, "checks": {}, "warnings": []}
+
+    api_base, api_source = settings.resolve("git_api")
+    ssh_base, ssh_source = settings.resolve("git_ssh")
+
+    if api_base:
+        report["checks"]["http"] = http_check(api_base)
+    else:
+        report["warnings"].append("WARRIOR_GIT_API not set - skipped HTTP reachability check")
+
+    if ssh_base:
+        report["checks"]["ssh"] = ssh_check(ssh_base)
+    else:
+        report["warnings"].append("WARRIOR_GIT_SSH not set - skipped SSH reachability check")
+
+    if api_base:
+        try:
+            token = forge_token(settings, required=False)
+        except ConfigError:
+            token = None
+        if token:
+            report["checks"]["auth"] = auth_check(api_base, token)
+        else:
+            report["warnings"].append("no API token available - skipped auth check (not required)")
+
+    bare_root, _ = settings.resolve("bare_root")
+    if bare_root:
+        usage = disk_usage(Path(bare_root).expanduser())
+        if usage:
+            report["checks"]["disk"] = usage
+            if usage["severity"] != "OK":
+                report["warnings"].append(
+                    f"disk at {usage['percent_used']}% used ({usage['available_gb']} GB free) "
+                    f"on the volume holding {usage['path']}"
+                )
+        else:
+            report["warnings"].append(f"bare_root {bare_root} not found - skipped disk check")
+    else:
+        report["warnings"].append("WARRIOR_GIT_BARE_ROOT not set - skipped disk check "
+                                  "(expected if the forge is not on this machine)")
+
+    gitea_db, _ = settings.resolve("gitea_db")
+    if gitea_db:
+        staleness = mirror_staleness(Path(gitea_db).expanduser())
+        if staleness:
+            report["checks"]["mirrors"] = staleness
+            if staleness["overdue"]:
+                report["warnings"].append(
+                    f"{staleness['overdue']} of {staleness['total_scheduled_mirrors']} "
+                    f"scheduled mirrors are overdue, oldest by "
+                    f"{staleness['oldest_overdue_days']} days"
+                )
+        else:
+            report["warnings"].append(f"gitea_db {gitea_db} not found or unreadable")
+    else:
+        report["warnings"].append("WARRIOR_GITEA_DB not set - skipped mirror staleness check")
+
+    if arguments.backup_dir:
+        freshness = backup_freshness(arguments.backup_dir)
+        if freshness:
+            report["checks"]["backups"] = freshness
+            if not freshness.get("found"):
+                report["warnings"].append(f"no backup files found in {arguments.backup_dir}")
+            elif freshness["age_hours"] > 48:
+                report["warnings"].append(
+                    f"newest backup is {freshness['age_hours']} hours old "
+                    f"({freshness['newest']}) - if this is meant to be scheduled, it isn't running"
+                )
+
+    # "Healthy" is a claim about what was checked, not a default. Zero checks
+    # performed is not evidence of health - it's evidence of nothing, and
+    # saying otherwise is the exact overclaim this project exists to catch.
+    if not report["checks"]:
+        overall = "UNKNOWN"
+    elif (any(report["checks"].get(k, {}).get("reachable") is False for k in ("http", "ssh"))
+          or report["checks"].get("disk", {}).get("severity") == "CRITICAL"):
+        overall = "ATTENTION NEEDED"
+    else:
+        overall = "HEALTHY"
+    report["overall"] = overall
+
+    payload = json.dumps(report, indent=2) + "\n"
+    if destination:
+        destination.write_text(payload)
+
+    if arguments.json:
+        print(payload, end="")
+        return 0 if overall != "ATTENTION NEEDED" else 1
+
+    print("WARRIOR SERVER STATUS — read-only")
+    for name, check in report["checks"].items():
+        print(f"\n[{name}]")
+        for key, value in check.items():
+            print(f"  {key}: {value}")
+    if report["warnings"]:
+        print("\nWARNINGS")
+        for warning in report["warnings"]:
+            print(f"  - {warning}")
+    else:
+        print("\nNo warnings.")
+    if overall == "UNKNOWN":
+        print("\noverall: UNKNOWN - nothing was configured to check. "
+              "Set WARRIOR_GIT_API / WARRIOR_GIT_SSH at minimum.")
+    else:
+        print(f"\noverall: {overall}")
+    if destination:
+        print(f"\nreport written to {destination}")
+    return 0 if overall != "ATTENTION NEEDED" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

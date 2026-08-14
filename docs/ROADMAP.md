@@ -2,7 +2,7 @@
 
 ## Chapter 1 — Know your machine, never lose work (SHIPPED)
 
-Five tools, each read-only or additive, each with real tests:
+Six tools, each read-only or additive, each with real tests:
 
 - **`warrior-scan`** — read-only work-loss scan: what could be lost right now,
   and where. Eleven vectors, from JetBrains shelves to unreachable commits.
@@ -17,6 +17,9 @@ Five tools, each read-only or additive, each with real tests:
 - **`warrior-credits`** — live credit/quota balance across every AI harness
   on this machine, at zero token cost, using each harness's own client-side
   status command rather than a billed prompt.
+- **`warrior-server-status`** — is your git forge actually healthy: reachability,
+  disk headroom, mirror staleness, backup freshness. "Answers HTTP 200" and
+  "wired up correctly" are different claims; this checks the second one.
 
 This chapter is real. It has been run against 415 repositories on a live
 machine, adversarially audited for safety and portability, and used to
