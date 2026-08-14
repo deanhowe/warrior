@@ -28,7 +28,7 @@ and takes uncommitted work out of it, reporting only "ok stashed". Bare
 `git branch` and bare `git worktree` list; bare `git stash` does not. The
 subcommand guard below exists for exactly that trap. Do not relax it.
 
-Origin: ported from Moof's `moof-git-loss-scan`, where it was built and
+Origin: extracted from a working production system, where this scanner was built and
 adversarially audited against 415 real repositories on one machine.
 
 Shelf detection deliberately runs its own scan policy, separate from the
@@ -1183,7 +1183,7 @@ def render_text(report: dict) -> str:
 
     lines.append("Read-only report. Every suggested next step above is also read-only;")
     lines.append("recovering or mirroring anything is your decision, not this tool's.")
-    lines.append("Vectors, guards and hard-won rules ported from Moof (moof-git-loss-scan).")
+    lines.append("Vectors, guards and hard-won rules extracted from a real production system.")
     return "\n".join(lines) + "\n"
 
 

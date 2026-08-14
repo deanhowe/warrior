@@ -1,4 +1,4 @@
-"""Shared forge plumbing for Moof Warrior.
+"""Shared forge plumbing for Warrior.
 
 Everything the `warrior-*` tools need to talk to a git server safely, with no
 machine-specific values compiled in. Three things live here:
@@ -67,7 +67,7 @@ class UnsafeGitCommand(RuntimeError):
 # Redaction
 # ---------------------------------------------------------------------------
 
-# Ported unchanged from moof-git-loss-scan: strips userinfo out of any URL so
+# Strips userinfo out of any URL so
 # Git inspection can never print embedded credentials.
 URL_USERINFO = re.compile(r"([a-z][a-z0-9+.-]*://)[^/@\s]+@", re.IGNORECASE)
 

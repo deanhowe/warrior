@@ -268,7 +268,7 @@ class BareRepositoryTest(unittest.TestCase):
         self.assertFalse(findings[0]["detail"]["evaluated"])
 
     def test_forge_exclusion_is_inert_on_a_machine_with_no_forge(self):
-        """The port must work where no Gitea and no Moof exist at all."""
+        """This tool must work on a machine with no forge configured at all."""
         repositories = [
             {"path": Path("/x/projects/app.git"), "bare": True, "git_dir": "a"},
             {"path": Path("/x/projects/app"), "bare": False, "git_dir": "b"},
@@ -432,7 +432,6 @@ class ReportTest(unittest.TestCase):
             text = MODULE.render_text(MODULE.scan([root], max_depth=2, caches_root=root / "absent"))
             self.assertIn("warrior scan", text)
             self.assertIn("Read-only report.", text)
-            self.assertIn("Moof", text)  # attribution to the origin project is kept
             self.assertTrue(text.endswith("\n"))
 
 
@@ -440,11 +439,9 @@ class PortabilityTest(unittest.TestCase):
     """The port must carry nothing from the machine it was written on."""
 
     def test_no_developer_specific_path_is_baked_into_the_tool(self):
-        for offender in ("/Users/", "/home/", "deanhowe", "PROJECTS", "moof.local", "kiro"):
+        for offender in ("/Users/", "/home/", "deanhowe", "PROJECTS", "moof.local",
+                         "kiro", "Moof", "Dean Howe"):
             self.assertNotIn(offender, SOURCE, offender)
-
-    def test_the_origin_project_is_still_credited(self):
-        self.assertIn("Moof", SOURCE)
 
     def test_jetbrains_caches_are_discovered_not_assumed(self):
         roots = MODULE.jetbrains_cache_roots()

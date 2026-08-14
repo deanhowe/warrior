@@ -348,14 +348,14 @@ class WalkTest(unittest.TestCase):
 
 class WhereTest(unittest.TestCase):
     def test_scores_exact_above_prefix_above_substring(self):
-        self.assertEqual((100, "exact"), MODULE.match_score("moof", "moof", "a/moof"))
-        self.assertEqual((95, "exact_icase"), MODULE.match_score("moof", "MOOF", "a/MOOF"))
+        self.assertEqual((100, "exact"), MODULE.match_score("acme", "acme", "a/acme"))
+        self.assertEqual((95, "exact_icase"), MODULE.match_score("acme", "ACME", "a/ACME"))
         self.assertEqual(
-            (85, "exact_normalized"), MODULE.match_score("moof-git", "moof_git", "a/moof_git")
+            (85, "exact_normalized"), MODULE.match_score("acme-vcs", "acme_vcs", "a/acme_vcs")
         )
-        self.assertEqual((70, "prefix"), MODULE.match_score("moof", "moofling", "a/moofling"))
-        self.assertEqual((50, "substring"), MODULE.match_score("oof", "moofling", "a/moofling"))
-        self.assertIsNone(MODULE.match_score("zzz", "moof", "a/moof"))
+        self.assertEqual((70, "prefix"), MODULE.match_score("acme", "acmeling", "a/acmeling"))
+        self.assertEqual((50, "substring"), MODULE.match_score("oof", "acmeling", "a/acmeling"))
+        self.assertIsNone(MODULE.match_score("zzz", "acme", "a/acme"))
 
     def test_a_query_with_a_slash_matches_the_path(self):
         self.assertEqual(
