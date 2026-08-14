@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""warrior-credits — live credit/quota balance across every AI harness on this
+machine, at zero token cost.
+
+Why this exists
+----------------
+"Know your machine" has to include "know your burn rate." A developer running
+several harnesses in parallel (Claude, Copilot, Kiro, Codex, ...) has no single
+place to see all four balances, and the naive way to check any of them —
+sending the harness a prompt asking "what's my usage" — actually SPENDS
+credits to find out. That was measured directly: Copilot's own /usage costs
+11.7 AI credits; Codex's `exec "/status"` costs ~62k tokens. Neither harness
+warns you before charging for the answer.
+
+The zero-cost trick, per harness
+---------------------------------
+Every one of these commands is a CLIENT-SIDE slash command or a startup
+render, intercepted before it ever reaches the model — but only when driven
+through the harness's real interactive TUI. A full-screen terminal UI can't be
+scraped from raw ANSI output reliably, so each harness is driven inside a real
+`tmux` session and read back with `tmux capture-pane`, which maintains an
+actual screen buffer. The session is always torn down, success or failure.
+
+  claude   /usage typed into the interactive TUI. No prompt sent.
+  copilot  the footer's "quota" statusline item, rendered on startup, before
+           any prompt — requires footer.showQuota=true (see --setup).
+  kiro     /usage via `chat --no-interactive`, confirmed client-side (numbers
+           did not move across repeated calls in the same session).
+  codex    /status typed into the interactive TUI. Note: `codex exec "/status"`
+           is a DIFFERENT code path with no slash-command interception and
+           bills a real prompt — never use exec mode for this.
+
+Portability
+-----------
+No harness path or working directory is hardcoded. Binaries are discovered on
+PATH (with a couple of well-known fallback locations, e.g. Codex ships inside
+ChatGPT.app on macOS). Each harness runs from an ephemeral scratch directory
+so a large surrounding project tree is never scanned on startup — for Kiro
+specifically, launching from a big tree has been observed to cause
+multi-minute hangs; a small dedicated directory answers in ~2.5s.
+
+A harness that isn't installed is reported as absent, not an error: the whole
+point of this tool is a dashboard across whatever you actually have, not a
+demand that you have all four.
+
+Safety
+------
+Read-only against every harness: this never sends a real prompt, never writes
+configuration (except the one documented --setup step for Copilot's footer,
+which is off by default and explained before it runs), and never deletes
+anything. Kiro's CLI is known not to die cleanly under a plain timeout — its
+child can be left spinning at ~99% CPU — so termination goes through
+os.killpg on the whole process group, not a bare process.kill().
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+TMUX_POLL_INTERVAL = 0.5
+
+
+class HarnessUnavailable(Exception):
+    """The harness is not installed on this machine. Not an error."""
+
+
+class QuotaFetchError(Exception):
+    """The harness is installed but the balance could not be read."""
+
+
+def find_binary(*candidates: str) -> str | None:
+    for candidate in candidates:
+        found = shutil.which(candidate)
+        if found:
+            return found
+    return None
+
+
+def require_tmux() -> str:
+    tmux = shutil.which("tmux")
+    if not tmux:
+        raise QuotaFetchError(
+            "tmux is required (these harnesses are full-screen TUIs that "
+            "cannot be scraped from raw ANSI output); install it and retry"
+        )
+    return tmux
+
+
+def scratch_dir() -> str:
+    """A small, private, disposable directory. Never the caller's cwd or any
+    project tree — that is what causes the Kiro startup-scan hang."""
+    return tempfile.mkdtemp(prefix="warrior-credits-")
+
+
+def tmux_session(tmux: str, name: str, workdir: str, command: list[str]) -> None:
+    subprocess.run(
+        [tmux, "new-session", "-d", "-s", name, "-x", "220", "-y", "60",
+         "-c", workdir, *command],
+        check=True, stdin=subprocess.DEVNULL,
+        capture_output=True, timeout=15,
+    )
+
+
+def tmux_capture(tmux: str, name: str, lines_back: int = 100) -> str:
+    result = subprocess.run(
+        [tmux, "capture-pane", "-t", name, "-p", "-S", f"-{lines_back}"],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=10,
+    )
+    return result.stdout if result.returncode == 0 else ""
+
+
+def tmux_send(tmux: str, name: str, *keys: str) -> None:
+    subprocess.run([tmux, "send-keys", "-t", name, *keys],
+                   capture_output=True, stdin=subprocess.DEVNULL, timeout=10)
+
+
+def tmux_kill(tmux: str, name: str) -> None:
+    subprocess.run([tmux, "kill-session", "-t", name],
+                   capture_output=True, stdin=subprocess.DEVNULL, timeout=10)
+
+
+def wait_for(tmux: str, name: str, pattern: str, attempts: int, lines_back: int = 100) -> str:
+    text = ""
+    for _ in range(attempts):
+        time.sleep(TMUX_POLL_INTERVAL)
+        text = tmux_capture(tmux, name, lines_back)
+        if re.search(pattern, text):
+            return text
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Claude
+# ---------------------------------------------------------------------------
+
+def fetch_claude() -> dict[str, Any]:
+    binary = find_binary("claude")
+    if not binary:
+        raise HarnessUnavailable("claude executable not found on PATH")
+    tmux = require_tmux()
+    session = f"warrior_claude_{os.getpid()}"
+    workdir = scratch_dir()
+    try:
+        tmux_session(tmux, session, workdir, [binary])
+        wait_for(tmux, session, r"Claude Code v", attempts=30)
+        tmux_send(tmux, session, "/usage")
+        time.sleep(0.3)
+        tmux_send(tmux, session, "Enter")
+        text = wait_for(tmux, session, r"Current week \(all models\)", attempts=20)
+        if "Current week (all models)" not in text:
+            raise QuotaFetchError("claude /usage did not render within timeout")
+        return parse_claude(text)
+    finally:
+        tmux_send(tmux, session, "Escape", "C-c")
+        tmux_kill(tmux, session)
+
+
+def parse_claude(text: str) -> dict[str, Any]:
+    session = re.search(r"Current session\s+[^\n]*\s+(\d+)% used\s+Resets\s+([^\n]+)", text)
+    week = re.search(r"Current week \(all models\)\s+[^\n]*\s+(\d+)% used\s+Resets\s+([^\n]+)", text)
+    if not session or not week:
+        raise QuotaFetchError("could not parse claude usage output")
+    session_used, week_used = int(session.group(1)), int(week.group(1))
+    return {
+        "session_pct_used": session_used, "session_pct_remaining": 100 - session_used,
+        "session_resets_on": session.group(2).strip(),
+        "weekly_pct_used": week_used, "weekly_pct_remaining": 100 - week_used,
+        "weekly_resets_on": week.group(2).strip(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Copilot
+# ---------------------------------------------------------------------------
+
+def fetch_copilot() -> dict[str, Any]:
+    binary = find_binary("copilot")
+    if not binary:
+        raise HarnessUnavailable("copilot executable not found on PATH")
+    tmux = require_tmux()
+    session = f"warrior_copilot_{os.getpid()}"
+    workdir = scratch_dir()
+    try:
+        tmux_session(tmux, session, workdir, [binary])
+        text = wait_for(tmux, session, r"Plan:", attempts=20)
+        line = next((l for l in text.splitlines() if "Plan:" in l), "")
+        if not line:
+            raise QuotaFetchError(
+                "quota line not in footer within timeout; the footer must be "
+                "enabled once with --setup-copilot-footer"
+            )
+        return parse_copilot(line)
+    finally:
+        tmux_kill(tmux, session)
+
+
+def parse_copilot(line: str) -> dict[str, Any]:
+    match = re.search(r"Plan:\s*([\d.]+)/([\d,]+)\s*\((\d+)% used\)", line)
+    if not match:
+        raise QuotaFetchError(f"could not parse copilot quota line: {line!r}")
+    used = float(match.group(1))
+    total = float(match.group(2).replace(",", ""))
+    return {
+        "plan_used": used, "plan_total": total,
+        "plan_pct_used": round(used / total * 100, 2) if total else None,
+        "plan_pct_remaining": round(100 - (used / total * 100), 2) if total else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Kiro
+# ---------------------------------------------------------------------------
+
+def fetch_kiro(timeout_seconds: int = 20) -> dict[str, Any]:
+    binary = find_binary("kiro-cli")
+    if not binary:
+        raise HarnessUnavailable("kiro-cli executable not found on PATH")
+    workdir = scratch_dir()
+
+    # A real login shell, not a direct exec: confirmed live that kiro-cli
+    # degrades or hangs without real login-shell ancestry (observed under
+    # both launchd and a GUI app's Process() API).
+    shell_cmd = f'exec "{binary}" chat --no-interactive --agent kiro_default "/usage"'
+    process = subprocess.Popen(
+        ["/bin/zsh", "-l", "-c", shell_cmd],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        start_new_session=True, text=True, cwd=workdir,
+    )
+    try:
+        output, _ = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        # A bare timeout does not reliably kill kiro-cli's child - observed
+        # spinning at ~99% CPU after the "killed" parent exited. Take out the
+        # whole process group.
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        raise QuotaFetchError(f"kiro-cli /usage did not respond within {timeout_seconds}s")
+    return parse_kiro(output)
+
+
+def parse_kiro(text: str) -> dict[str, Any]:
+    clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", text)
+    plan = re.search(r"Credits\s*\(([\d.]+)\s*of\s*(\d+)\s*covered in plan\)", clean)
+    bonus = re.search(r"([\d.]+)/(\d+)\s*credits used, expires in\s*(\d+)\s*days?", clean)
+    reset = re.search(r"resets on\s*(\d{4}-\d{2}-\d{2})", clean)
+    if not plan:
+        raise QuotaFetchError(f"could not parse kiro plan credits: {clean[:300]!r}")
+    used, total = float(plan.group(1)), float(plan.group(2))
+    result: dict[str, Any] = {
+        "plan_used": used, "plan_total": total,
+        "plan_pct_used": round(used / total * 100, 2) if total else None,
+        "plan_pct_remaining": round(100 - (used / total * 100), 2) if total else None,
+        "resets_on": reset.group(1) if reset else None,
+    }
+    if bonus:
+        result["bonus_used"] = float(bonus.group(1))
+        result["bonus_total"] = float(bonus.group(2))
+        result["bonus_days_left"] = int(bonus.group(3))
+    else:
+        result["bonus_used"] = result["bonus_total"] = result["bonus_days_left"] = None
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Codex
+# ---------------------------------------------------------------------------
+
+def fetch_codex() -> dict[str, Any]:
+    binary = find_binary(
+        "codex",
+        "/Applications/ChatGPT.app/Contents/Resources/codex",  # macOS bundle
+    )
+    if not binary or not Path(binary).exists():
+        raise HarnessUnavailable("codex executable not found on PATH")
+    tmux = require_tmux()
+    session = f"warrior_codex_{os.getpid()}"
+    workdir = scratch_dir()
+    try:
+        tmux_session(tmux, session, workdir, [binary])
+        for _ in range(20):
+            time.sleep(TMUX_POLL_INTERVAL)
+            pane = tmux_capture(tmux, session)
+            if "Do you trust the contents" in pane:
+                tmux_send(tmux, session, "Enter")  # default: "Yes, continue"
+            elif "Hooks need review" in pane:
+                # Never auto-trust hooks - that is a real permission grant,
+                # not this tool's to make. Explicitly choose "without trusting".
+                tmux_send(tmux, session, "Down", "Down", "Enter")
+            elif re.search(r"OpenAI Codex.*v\d", pane):
+                break
+        tmux_send(tmux, session, "/status")
+        time.sleep(1)
+        tmux_send(tmux, session, "Enter")
+        text = wait_for(tmux, session, r"Weekly limit:", attempts=15)
+        line = next((l for l in text.splitlines() if "Weekly limit:" in l), "")
+        if not line:
+            raise QuotaFetchError("weekly limit line not found within timeout")
+        return parse_codex(line)
+    finally:
+        tmux_send(tmux, session, "C-c")
+        tmux_kill(tmux, session)
+
+
+def parse_codex(line: str) -> dict[str, Any]:
+    match = re.search(r"(\d+)% left \(resets ([\d:]+) on ([\d A-Za-z]+)\)", line)
+    if not match:
+        raise QuotaFetchError(f"could not parse codex weekly limit line: {line!r}")
+    remaining = int(match.group(1))
+    return {
+        "weekly_pct_remaining": remaining, "weekly_pct_used": 100 - remaining,
+        "resets_at": match.group(2).strip(), "resets_date": match.group(3).strip(),
+    }
+
+
+FETCHERS = {
+    "claude": fetch_claude,
+    "copilot": fetch_copilot,
+    "kiro": fetch_kiro,
+    "codex": fetch_codex,
+}
+
+LOW_WATERMARK_PCT = 20  # below this remaining, call it out
+
+
+def setup_copilot_footer() -> int:
+    settings = Path.home() / ".copilot" / "settings.json"
+    print(f"This enables Copilot's footer quota display by editing {settings}.")
+    print("It sets footer.showQuota=true. Nothing else is changed.")
+    if not settings.parent.exists():
+        print("Copilot config directory not found; is Copilot installed?", file=sys.stderr)
+        return 1
+    data: dict[str, Any] = {}
+    if settings.exists():
+        try:
+            data = json.loads(settings.read_text())
+        except json.JSONDecodeError:
+            print(f"refusing to edit {settings}: not valid JSON", file=sys.stderr)
+            return 1
+    data.setdefault("footer", {})["showQuota"] = True
+    settings.write_text(json.dumps(data, indent=2) + "\n")
+    print("Done. showQuota=true.")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("harness", nargs="*", choices=list(FETCHERS.keys()),
+                        help="which harness to check (default: all installed)")
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--setup-copilot-footer", action="store_true",
+                        help="one-time: enable Copilot's footer quota display, then exit")
+    arguments = parser.parse_args()
+
+    if arguments.setup_copilot_footer:
+        return setup_copilot_footer()
+
+    targets = arguments.harness or list(FETCHERS.keys())
+    results: dict[str, Any] = {}
+    for name in targets:
+        started = time.time()
+        try:
+            data = FETCHERS[name]()
+            data["status"] = "ok"
+            data["fetched_at"] = int(time.time())
+            data["fetch_seconds"] = round(time.time() - started, 1)
+        except HarnessUnavailable as error:
+            data = {"status": "not_installed", "detail": str(error)}
+        except QuotaFetchError as error:
+            data = {"status": "error", "detail": str(error)}
+        except Exception as error:  # noqa: BLE001 - report, never crash the dashboard
+            data = {"status": "error", "detail": f"{type(error).__name__}: {error}"}
+        results[name] = data
+
+    if arguments.json:
+        print(json.dumps(results, indent=2))
+        return 0
+
+    print("WARRIOR CREDITS — live balance, zero token cost")
+    print("  read-only against every harness; never sends a real prompt\n")
+    low = []
+    for name, data in results.items():
+        if data["status"] == "not_installed":
+            print(f"  {name:<10} not installed")
+            continue
+        if data["status"] == "error":
+            print(f"  {name:<10} ERROR — {data['detail']}")
+            continue
+        remaining = data.get("plan_pct_remaining", data.get("weekly_pct_remaining"))
+        session_remaining = data.get("session_pct_remaining")
+        parts = []
+        if session_remaining is not None:
+            parts.append(f"session {session_remaining}% remaining")
+        if remaining is not None:
+            parts.append(f"{remaining}% remaining")
+            if remaining < LOW_WATERMARK_PCT:
+                low.append(name)
+        reset = data.get("weekly_resets_on") or data.get("resets_on") or data.get("resets_date")
+        suffix = f" (resets {reset})" if reset else ""
+        print(f"  {name:<10} {'  '.join(parts)}{suffix}")
+
+    if low:
+        print(f"\n  LOW: {', '.join(low)} below {LOW_WATERMARK_PCT}% — protect it, route work elsewhere")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

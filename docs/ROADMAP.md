@@ -1,0 +1,48 @@
+# Roadmap
+
+## Chapter 1 — Know your machine, never lose work (SHIPPED)
+
+Five tools, each read-only or additive, each with real tests:
+
+- **`warrior-scan`** — read-only work-loss scan: what could be lost right now,
+  and where. Eleven vectors, from JetBrains shelves to unreachable commits.
+- **`warrior-facts`** — answers questions about this developer's machine,
+  read-only: where is X, what repositories exist, what's unprotected.
+- **`warrior-protect`** — gives an unprotected local repository a verified
+  home on a git server, and proves it landed by checking the server's refs,
+  not by trusting an exit code.
+- **`warrior-classify`** — classifies the repositories on a git server by
+  purpose (first-party, mirror, archive, package), and can record that as
+  forge topics.
+- **`warrior-credits`** — live credit/quota balance across every AI harness
+  on this machine, at zero token cost, using each harness's own client-side
+  status command rather than a billed prompt.
+
+This chapter is real. It has been run against 415 repositories on a live
+machine, adversarially audited for safety and portability, and used to
+recover work that had been sitting unprotected for years.
+
+## Chapter 2 and beyond — build your own control plane (ROADMAP, NOT SHIPPED)
+
+Nothing below this line exists yet. It describes the direction, not a
+capability you can use today.
+
+1. **Fact discovery about your machine** — beyond `warrior-facts`' current
+   scope: a persistent index of what's where, refreshed rather than
+   recomputed from scratch every time.
+2. **Durable memory of decisions** — a record of what was found, what was
+   decided, and why, that survives a single session and can be queried later.
+3. **Routing work to cheap models** — a deliberate policy for sending
+   mechanical, well-specified work to the cheapest capable model, and
+   reserving expensive judgment for what actually needs it.
+4. **Running your own private git forge** — the parts of this project that
+   currently assume "a forge exists, configured via environment variables"
+   becoming a guided setup of that forge itself.
+5. **Bridging multiple AI harnesses together** — letting different coding
+   agents hand work to each other with a shared, auditable authority model,
+   rather than each operating in isolation.
+
+Each of these is a real, working pattern in the private system this project
+was extracted from. None of it has been generalised, ported, or tested
+outside that one machine yet. Until a chapter appears above the line in
+Chapter 1, treat it as intent, not delivery.
