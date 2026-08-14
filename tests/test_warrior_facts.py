@@ -354,7 +354,7 @@ class WhereTest(unittest.TestCase):
             (85, "exact_normalized"), MODULE.match_score("acme-vcs", "acme_vcs", "a/acme_vcs")
         )
         self.assertEqual((70, "prefix"), MODULE.match_score("acme", "acmeling", "a/acmeling"))
-        self.assertEqual((50, "substring"), MODULE.match_score("oof", "acmeling", "a/acmeling"))
+        self.assertEqual((50, "substring"), MODULE.match_score("meli", "acmeling", "a/acmeling"))
         self.assertIsNone(MODULE.match_score("zzz", "acme", "a/acme"))
 
     def test_a_query_with_a_slash_matches_the_path(self):
