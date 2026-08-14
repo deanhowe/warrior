@@ -1,0 +1,1283 @@
+#!/usr/bin/env python3
+"""warrior-scan — read-only work-loss scan: what could be lost right now, and where.
+
+Answers one question across a set of roots: which work exists in only one
+place, or in a place Git will never show you. Eleven vectors are reported,
+from JetBrains shelves (invisible to `git status` by upstream default) to
+repositories that carry no mirror at all.
+
+Nothing here is machine-specific. Roots come from the command line. The
+JetBrains cache location is discovered per platform (macOS
+~/Library/Caches/JetBrains, Linux ~/.cache/JetBrains or $XDG_CACHE_HOME,
+Windows %LOCALAPPDATA%\\JetBrains) and can be overridden. A Git forge's own
+object store is recognised by naming convention and can be declared
+explicitly; on a machine with no forge at all, that exclusion simply never
+fires.
+
+This tool only ever reads. Every Git call goes through one guarded choke
+point that refuses any subcommand outside a read-only allowlist, and refuses
+the ambiguous bare forms outright. It never stages, commits, checks out,
+resets, cleans, shelves, prunes, collects garbage, drops, removes, moves, or
+mirrors anything. The single write it can perform is the report file
+requested with --output.
+
+LOUD WARNING for anyone extending this file: the bare `git stash` form is NOT
+a listing command, and neither is it under a wrapper CLI that proxies Git
+(verified against one such wrapper). It performs a stash of the working tree
+and takes uncommitted work out of it, reporting only "ok stashed". Bare
+`git branch` and bare `git worktree` list; bare `git stash` does not. The
+subcommand guard below exists for exactly that trap. Do not relax it.
+
+Origin: ported from Moof's `moof-git-loss-scan`, where it was built and
+adversarially audited against 415 real repositories on one machine.
+
+Shelf detection deliberately runs its own scan policy, separate from the
+repository walk. Shelves live under `.idea/`, which a repository census
+prunes as editor noise, and they sit several directories deeper than repo
+discovery needs to go. The tradeoff is cost versus coverage: vendor trees
+are skipped by default because published npm packages ship their own
+populated `.idea/shelf/` directories, so walking them is slow and almost
+entirely false positives. Pass --include-vendor-shelves to cover them
+anyway; either way the choice is stated in `warnings`, never silently.
+
+Findings, never fixes. Every suggested next step is itself read-only.
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+# Repository discovery prune set. Editor metadata is pruned here because the
+# shelf walk below covers `.idea` with its own, wider policy.
+PRUNE_NAMES = {
+    ".build", ".cache", ".git", ".gradle", ".idea", ".next", ".pnpm",
+    ".swiftpm", ".terraform", ".venv", "DerivedData", "Pods", "__pycache__",
+    "bower_components", "build", "coverage", "dist", "node_modules",
+    "storage", "target", "venv", "vendor",
+}
+SENSITIVE_NAMES = {".aws", ".gnupg", ".ssh", "Keychains", "credentials", "secrets"}
+
+# Shelf walk prune set: narrower than PRUNE_NAMES because `.idea` is the
+# whole point, wider on cost because vendored packages ship real shelves.
+SHELF_PRUNE = {
+    ".build", ".cache", ".git", ".gradle", ".next", ".swiftpm", ".terraform",
+    ".venv", "DerivedData", "Pods", "__pycache__", "coverage", "target", "venv",
+}
+VENDOR_NAMES = {".pnpm", "bower_components", "node_modules", "vendor"}
+
+# Untracked build output is untracked work's loudest neighbour; named so it can be set aside.
+# `tmp` is deliberately absent: tmp directories routinely hold work in progress,
+# and a scanner that dismisses them as debris is how that work gets thrown away.
+DEBRIS_NAMES = PRUNE_NAMES | VENDOR_NAMES | {
+    ".DS_Store", ".pytest_cache", ".ruff_cache", "Thumbs.db",
+}
+
+# Paths whose unreachable objects are vendored upstream history, not work.
+VENDORED_HISTORY = re.compile(r"(^|/)(upstream|vendor|node_modules|\.pnpm)(/|$)")
+
+# A Git forge's own object store is the mirror destination, not work at risk.
+# Without this, a self-hosted forge's several hundred bare mirrors each report
+# as "no remote configured, single copy" - exactly backwards, and it buries the
+# findings that matter. Recognition is by naming convention, so on a machine
+# with no forge installed nothing matches and nothing is excluded. Additional
+# stores can be declared with --forge-root or FORGE_ROOTS_ENV.
+FORGE_STORE = re.compile(r"(^|/)(gitea|gitea-repositories|forgejo|gogs)(/|$)")
+
+# Trees whose filenames are private financial or credential material.
+# Findings still fire; only the filename sample is withheld, and visibly so.
+SAMPLE_WITHHELD = re.compile(r"(^|/)(\.tax|\.aws|\.gnupg|\.ssh|Keychains|credentials|secrets)(/|$)")
+
+URL_USERINFO = re.compile(r"([a-z][a-z0-9+.-]*://)[^/@\s]+@", re.IGNORECASE)
+SENSITIVE_RE = re.compile(
+    r"(?:^|[._-])(credential|secret|token|password|private[-_]?key|id_rsa|id_ed25519)(?:[._-]|$)|^\.env",
+    re.I,
+)
+
+# Read-only Git surface. Nothing outside this set can be executed at all.
+READ_ONLY_GIT = frozenset(
+    "cat-file check-ignore config count-objects for-each-ref fsck log ls-files "
+    "merge-base remote rev-list rev-parse stash status worktree".split()
+)
+# Subcommands whose bare or wrong token mutates. Verified traps.
+#
+# These are checked on the first NON-OPTION token, not blindly on args[1]:
+# `-v` is a modifier for `remote`, so a guard that only inspected args[1] let
+# `git remote -v remove <name>` through - verified on git 2.50.1 to actually
+# delete a remote. Options (leading `-`) are permitted; verbs are not, unless
+# allowlisted here.
+GUARD_REQUIRE_VERB = {
+    "stash": {"list", "show"},
+    "worktree": {"list"},
+}
+# `remote` takes NO verb at all here - only read-only option forms.
+GUARD_NO_VERB = {
+    "remote": {"-v", "--verbose"},
+}
+# `config` is read-only only via these options, and must carry no verb.
+GUARD_REQUIRE_OPTION = {
+    "config": {"--get", "--get-all", "--get-regexp", "--list"},
+}
+
+VECTOR_NAMES = {
+    "V1": "jetbrains_shelf",
+    "V2": "jetbrains_local_history",
+    "V3": "git_stash",
+    "V4": "unreachable_commits",
+    "V5": "untracked_worktree",
+    "V6": "index_only_blob",
+    "V7": "unmirrored_commits",
+    "V8": "symlink_double_identity",
+    "V9": "stale_submodule_gitlink",
+    "V10": "bare_repository",
+    "V11": "nested_repo_hidden_from_parent",
+}
+SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "INFO": 3}
+SEVERITY_MEANING = {
+    "CRITICAL": "only copy of real work, and Git will not show it to you",
+    "HIGH": "single copy: no mirror, ahead of every mirror, or shelved off to the side",
+    "MEDIUM": "recoverable today, but on an expiry clock",
+    "INFO": "structural: understand it before you move or clean anything",
+}
+
+
+# Machine-specific locations are never hardcoded. They are discovered per
+# platform, and either environment variable overrides the discovery entirely.
+JETBRAINS_CACHES_ENV = "WARRIOR_JETBRAINS_CACHES"
+FORGE_ROOTS_ENV = "WARRIOR_FORGE_ROOTS"
+
+
+def env_paths(name: str) -> list[Path]:
+    """Read a PATH-style list of directories from the environment."""
+    raw = os.environ.get(name, "")
+    return [Path(item).expanduser() for item in raw.split(os.pathsep) if item.strip()]
+
+
+def unique_paths(paths: list[Path]) -> list[Path]:
+    ordered: list[Path] = []
+    for path in paths:
+        if path not in ordered:
+            ordered.append(path)
+    return ordered
+
+
+def jetbrains_cache_roots() -> list[Path]:
+    """Discover the JetBrains cache directories for this platform.
+
+    No path in here is baked in for one machine. The host convention comes
+    first, then the other known layouts, because a Toolbox or cross-platform
+    install does not always follow the host's convention. Directories that do
+    not exist are simply never read, so this is safe on a machine with no
+    JetBrains IDE at all.
+    """
+    override = env_paths(JETBRAINS_CACHES_ENV)
+    if override:
+        return unique_paths(override)
+    home = Path.home()
+    candidates: list[Path] = []
+    if sys.platform == "darwin":
+        candidates.append(home / "Library" / "Caches" / "JetBrains")
+    elif os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA")
+        candidates.append(
+            Path(local).expanduser() / "JetBrains" if local
+            else home / "AppData" / "Local" / "JetBrains"
+        )
+    else:
+        xdg = os.environ.get("XDG_CACHE_HOME")
+        candidates.append(
+            Path(xdg).expanduser() / "JetBrains" if xdg else home / ".cache" / "JetBrains"
+        )
+    candidates.extend([
+        home / "Library" / "Caches" / "JetBrains",
+        home / ".cache" / "JetBrains",
+        home / "AppData" / "Local" / "JetBrains",
+    ])
+    return unique_paths(candidates)
+
+
+def redact_remote(line: str) -> str:
+    """Remove URL userinfo so Git inspection cannot print embedded credentials."""
+    return URL_USERINFO.sub(r"\1[REDACTED]@", line)
+
+
+def severity_for(vector: str, context: dict | None = None) -> str:
+    """Rank a vector: only-copy-and-invisible outranks only-copy outranks clock."""
+    context = context or {}
+    if vector in {"V1", "V6"}:
+        return "CRITICAL"
+    if vector == "V5":
+        return "CRITICAL" if not context.get("has_remote", True) else "HIGH"
+    if vector in {"V3", "V7"}:
+        return "HIGH"
+    if vector in {"V2", "V4"}:
+        return "MEDIUM"
+    return "INFO"
+
+
+def finding(
+    vector: str,
+    severity: str,
+    evidence: str,
+    next_step: str,
+    repo: str | None = None,
+    path: str | None = None,
+    age_days: int | None = None,
+    observed: str | None = None,
+    detail: dict | None = None,
+) -> dict:
+    record = {
+        "vector": vector,
+        "vector_name": VECTOR_NAMES[vector],
+        "severity": severity,
+        "repo": repo,
+        "path": path,
+        "evidence": evidence,
+        "age_days": age_days,
+        "observed": observed,
+        "next_step": next_step,
+    }
+    if detail:
+        record["detail"] = detail
+    return record
+
+
+def assert_read_only(args: tuple[str, ...]) -> None:
+    """Refuse anything that is not a proven read-only Git form."""
+    if not args:
+        raise RuntimeError("refusing to invoke git with no subcommand")
+    subcommand = args[0]
+    if subcommand not in READ_ONLY_GIT:
+        raise RuntimeError(f"refusing non-read-only git subcommand: {subcommand}")
+    rest = args[1:]
+    verbs = [token for token in rest if not token.startswith("-")]
+    options = [token for token in rest if token.startswith("-")]
+
+    if subcommand in GUARD_NO_VERB:
+        # Any verb at all is a mutation risk here (remove/set-url/prune/add).
+        if verbs:
+            raise RuntimeError(f"refusing git {subcommand} with verb: {verbs[0]}")
+        if not set(options) <= GUARD_NO_VERB[subcommand]:
+            raise RuntimeError(f"refusing git {subcommand} with options: {options}")
+        # Require an explicit read-only option. Bare `git remote` is harmless
+        # today, but demanding the explicit form keeps the contract narrow.
+        if not options:
+            raise RuntimeError(f"refusing bare git subcommand: {subcommand}")
+
+    if subcommand in GUARD_REQUIRE_OPTION:
+        if verbs and subcommand == "config" and not options:
+            raise RuntimeError(f"refusing git config with no read-only option")
+        if not set(options) & GUARD_REQUIRE_OPTION[subcommand]:
+            raise RuntimeError(
+                f"refusing git {subcommand} without a read-only option"
+            )
+
+    if subcommand in GUARD_REQUIRE_VERB:
+        allowed = GUARD_REQUIRE_VERB[subcommand]
+        if not verbs:
+            raise RuntimeError(f"refusing bare git subcommand: {subcommand}")
+        if verbs[0] not in allowed:
+            raise RuntimeError(
+                f"refusing ambiguous git form: {subcommand} {verbs[0]}"
+            )
+        if len(verbs) > 1:
+            raise RuntimeError(
+                f"refusing git {subcommand} with extra verb: {verbs[1]}"
+            )
+
+
+def git(repo: Path, *args: str, timeout: int = 90) -> tuple[int, str, str]:
+    """The one and only subprocess choke point. Guarded, read-only, never prompts."""
+    assert_read_only(args)
+    try:
+        process = subprocess.run(
+            # --no-optional-locks: without it `git status` REFRESHES AND WRITES
+            # BACK .git/index (verified: index hash changed) and, as a side
+            # effect, EXECUTES the repository's post-index-change hook. That
+            # would make this tool neither read-only nor safe against a repo
+            # supplying its own programs.
+            # -c core.fsmonitor=: `git status` otherwise executes the
+            # repository-configured fsmonitor program. Same class of problem.
+            ["git", "--no-optional-locks", "-c", "core.fsmonitor=",
+             "-C", str(repo), *args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return -1, "", f"{type(error).__name__}: {str(error)[:200]}"
+    return process.returncode, process.stdout, process.stderr.strip()[:200]
+
+
+def out(result: tuple[int, str, str]) -> str:
+    return result[1].strip()
+
+
+def age_days(moment: dt.datetime | None) -> int | None:
+    if moment is None:
+        return None
+    now = dt.datetime.now(dt.timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    return max(0, (now - moment).days)
+
+
+def parse_iso(value: str) -> dt.datetime | None:
+    try:
+        return dt.datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
+def from_mtime(path: Path) -> dt.datetime | None:
+    try:
+        return dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc)
+    except OSError:
+        return None
+
+
+def human_bytes(size: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{size} B"
+        size /= 1024.0
+    return f"{size:.1f} GB"
+
+
+def plural(count: int, singular: str, many: str | None = None) -> str:
+    return f"{count} {singular}" if count == 1 else f"{count} {many or singular + 's'}"
+
+
+def build_debris(path: str) -> bool:
+    """True when an untracked entry is build or dependency output rather than work."""
+    parts = [part for part in path.rstrip("/").split("/") if part]
+    return any(part in DEBRIS_NAMES for part in parts)
+
+
+def parse_status(payload: str) -> list[dict]:
+    """Parse `status --porcelain=v1 -z` by byte offset.
+
+    Field XY is two characters wide and collapses under whitespace splitting,
+    so it is read positionally. Rename and copy records carry a second
+    NUL-terminated source path which is consumed, not treated as an entry.
+    """
+    records = []
+    fields = [item for item in payload.split("\0") if item != ""]
+    index = 0
+    while index < len(fields):
+        entry = fields[index]
+        index += 1
+        if len(entry) < 4:
+            continue
+        x, y, path = entry[0], entry[1], entry[3:]
+        if x in {"R", "C"} and index < len(fields):
+            index += 1  # rename/copy source path
+        records.append({"x": x, "y": y, "path": path})
+    return records
+
+
+def dedupe_roots(supplied: list[Path]) -> tuple[list[Path], list[dict]]:
+    """Resolve roots physically so a symlinked alias is not scanned twice."""
+    roots: list[Path] = []
+    findings: list[dict] = []
+    seen: dict[Path, Path] = {}
+    for raw in supplied:
+        # Absolute-but-unresolved, so a merely relative argument is not mistaken for an alias.
+        expanded = Path(os.path.abspath(raw.expanduser()))
+        resolved = expanded.resolve()
+        if resolved in seen:
+            findings.append(finding(
+                "V8",
+                severity_for("V8"),
+                f"{expanded} and {seen[resolved]} are the same tree ({resolved}); scanned once",
+                "Inspect both spellings before staging through either. Git refuses to walk a "
+                "symlinked directory, so paths staged through the alias read as worktree "
+                "deletions while the index keeps a blob (vector V6).",
+                path=str(expanded),
+                detail={"alias_of": str(seen[resolved]), "resolved": str(resolved)},
+            ))
+            continue
+        if expanded != resolved:
+            findings.append(finding(
+                "V8",
+                severity_for("V8"),
+                f"root {expanded} is a symlink to {resolved}; reported under the real path",
+                "Use the resolved path for any Git operation. Comparing the index copy against "
+                "the on-disk copy is the only way to know whether the duplicate is cosmetic.",
+                path=str(expanded),
+                detail={"resolved": str(resolved)},
+            ))
+        seen[resolved] = expanded
+        roots.append(resolved)
+    return roots, findings
+
+
+def walk(root: Path, max_depth: int, prune: set[str]) -> tuple[list[Path], list[Path], Counter]:
+    """Bounded physical walk. Symlinked directories are recorded, never followed."""
+    directories: list[Path] = [root]
+    symlinks: list[Path] = []
+    excluded: Counter = Counter()
+    for current, dirs, _files in os.walk(root, topdown=True, followlinks=False):
+        path = Path(current)
+        try:
+            depth = len(path.relative_to(root).parts)
+        except ValueError:
+            continue
+        dirs.sort(key=str.casefold)
+        kept = []
+        for name in dirs:
+            child = path / name
+            if name in SENSITIVE_NAMES:
+                excluded["sensitive"] += 1
+            elif name in prune:
+                excluded["noisy"] += 1
+            elif depth + 1 > max_depth:
+                excluded["depth_limit"] += 1
+            elif child.is_symlink():
+                symlinks.append(child)
+                excluded["symlink_not_followed"] += 1
+            else:
+                kept.append(name)
+                directories.append(child)
+                continue
+        dirs[:] = kept
+    return directories, symlinks, excluded
+
+
+def candidate_repositories(directories: list[Path]) -> list[Path]:
+    found = []
+    for path in directories:
+        marker = path / ".git"
+        if marker.is_dir() or marker.is_file():
+            found.append(path)
+            continue
+        if (path / "HEAD").is_file() and (path / "objects").is_dir() and (path / "refs").is_dir():
+            found.append(path)
+    return found
+
+
+def resolve_repositories(candidates: list[Path]) -> tuple[list[dict], list[dict]]:
+    """Dedupe on the absolute git dir; an empty `.git` otherwise clones its ancestor's stats."""
+    resolved: dict[str, dict] = {}
+    errors: list[dict] = []
+    for path in candidates:
+        code, git_dir, message = git(path, "rev-parse", "--absolute-git-dir", timeout=20)
+        git_dir = git_dir.strip()
+        if code != 0 or not git_dir:
+            errors.append({
+                "path": str(path),
+                "command": "rev-parse --absolute-git-dir",
+                "message": message or "no git directory resolved",
+            })
+            continue
+        bare = out(git(path, "rev-parse", "--is-bare-repository", timeout=20)) == "true"
+        if bare:
+            top = str(Path(git_dir).resolve())
+        else:
+            top = out(git(path, "rev-parse", "--show-toplevel", timeout=20))
+            if not top:
+                # An object store with no working tree, however core.bare is spelled.
+                bare = True
+                top = str(Path(git_dir).resolve())
+            elif Path(top).resolve() != path.resolve():
+                continue  # empty `.git` phantom: git walked up to an ancestor repo
+        key = str(Path(git_dir).resolve())
+        if key not in resolved:
+            resolved[key] = {"path": Path(top), "git_dir": key, "bare": bare}
+    ordered = sorted(resolved.values(), key=lambda item: str(item["path"]).casefold())
+    return ordered, errors
+
+
+def shelf_patches(root: Path, max_depth: int, include_vendor: bool) -> list[dict]:
+    """Find JetBrains shelved patches under their own, wider scan policy."""
+    prune = set(SHELF_PRUNE) if include_vendor else set(SHELF_PRUNE) | VENDOR_NAMES
+    hits: list[dict] = []
+    for current, dirs, _files in os.walk(root, topdown=True, followlinks=False):
+        path = Path(current)
+        try:
+            depth = len(path.relative_to(root).parts)
+        except ValueError:
+            continue
+        dirs.sort(key=str.casefold)
+        kept = []
+        for name in dirs:
+            child = path / name
+            if name in SENSITIVE_NAMES or name in prune:
+                continue
+            if depth + 1 > max_depth and name != ".idea":
+                continue
+            if child.is_symlink():
+                continue
+            kept.append(name)
+        dirs[:] = kept
+        if path.name != ".idea":
+            continue
+        shelf = path / "shelf"
+        # is_dir() follows symlinks, and os.walk(followlinks=False) still walks
+        # the ROOT path it is handed - followlinks only governs subdirectories.
+        # Without this check a symlinked .idea/shelf leaks paths from outside
+        # the scanned root into the report.
+        if shelf.is_symlink() or not shelf.is_dir():
+            continue
+        dirs[:] = []
+        for shelf_current, _shelf_dirs, shelf_files in os.walk(shelf, followlinks=False):
+            for name in sorted(shelf_files):
+                if not name.endswith(".patch"):
+                    continue
+                patch = Path(shelf_current) / name
+                try:
+                    size = patch.stat().st_size
+                except OSError:
+                    continue
+                parts = patch.parts
+                hits.append({
+                    "path": str(patch),
+                    "size": size,
+                    "modified": from_mtime(patch),
+                    "vendored": any(part in VENDOR_NAMES for part in parts),
+                })
+    hits.sort(key=lambda item: item["path"].casefold())
+    return hits
+
+
+def shelf_findings(hits: list[dict]) -> list[dict]:
+    findings = []
+    for hit in hits:
+        modified = hit["modified"]
+        stamp = modified.date().isoformat() if modified else None
+        vendored = hit["vendored"]
+        severity = "INFO" if vendored else severity_for("V1")
+        note = " (vendored package, almost certainly upstream junk)" if vendored else ""
+        findings.append(finding(
+            "V1",
+            severity,
+            f"shelved patch {human_bytes(hit['size'])}{note}",
+            "Read it in place: `head -c 2000 <patch>`. JetBrains embeds the pre-image in the "
+            "patch, so the original file is recoverable from this file alone. Copy it somewhere "
+            "outside the project before any IDE upgrade. Never delete the `.idea` directory.",
+            path=hit["path"],
+            age_days=age_days(modified),
+            observed=stamp,
+            detail={"bytes": hit["size"], "vendored": vendored},
+        ))
+    return findings
+
+
+def local_history_findings(caches_root: Path) -> list[dict]:
+    """Report the JetBrains LocalHistory stores by path and clock only, never content."""
+    findings: list[dict] = []
+    if not caches_root.is_dir():
+        return findings
+    for ide in sorted(caches_root.iterdir(), key=lambda item: item.name.casefold()):
+        store = ide / "LocalHistory"
+        if not store.is_dir():
+            continue
+        changes = store / "changes.storageData"
+        content = ide / "caches" / "content.dat"
+        try:
+            size = sum(item.stat().st_size for item in store.iterdir() if item.is_file())
+        except OSError:
+            continue
+        if size < 65536:
+            continue  # a few bytes of scaffolding, not a history worth alerting on
+        changed_at = from_mtime(changes)
+        content_at = from_mtime(content)
+        gap = None
+        if changed_at and content_at:
+            gap = max(0, (changed_at - content_at).days)
+        evidence = f"local history store {human_bytes(size)} for {ide.name}"
+        if content.is_file():
+            evidence += f", content store {human_bytes(content.stat().st_size)}"
+        if gap:
+            evidence += f"; change log is {gap} days ahead of the content store"
+        findings.append(finding(
+            "V2",
+            severity_for("V2"),
+            evidence,
+            "This lives outside every repository and is destroyed by cache clears and IDE "
+            "upgrades. Recover read-only with `strings <content.dat> | grep <marker>` before "
+            "any cleanup. Do not clear IDE caches until it has been checked.",
+            path=str(store),
+            age_days=age_days(changed_at),
+            observed=changed_at.date().isoformat() if changed_at else None,
+            detail={
+                "bytes": size,
+                "content_store": str(content) if content.is_file() else None,
+                "content_store_lag_days": gap,
+            },
+        ))
+    return findings
+
+
+def stash_findings(repo: Path) -> list[dict]:
+    code, payload, _ = git(repo, "stash", "list", "--format=%gd%x1f%ci%x1f%gs")
+    if code != 0 or not payload.strip():
+        return []
+    entries = []
+    for line in payload.splitlines():
+        parts = line.split("\x1f")
+        if len(parts) != 3:
+            continue
+        entries.append({"ref": parts[0], "date": parts[1], "subject": parts[2]})
+    if not entries:
+        return []
+    dates = [parse_iso(entry["date"]) for entry in entries]
+    dates = [item for item in dates if item]
+    oldest = min(dates) if dates else None
+    sample = "; ".join(f"{entry['ref']} {entry['subject']}" for entry in entries[:4])
+    return [finding(
+        "V3",
+        severity_for("V3"),
+        f"{len(entries)} stash entr{'y' if len(entries) == 1 else 'ies'}: {sample}",
+        "Stashes are never carried by any normal mirror refspec, so a fully mirrored repo can "
+        "still lose all of them. Inspect without applying: `git stash show -p stash@{0}`.",
+        repo=str(repo),
+        age_days=age_days(oldest),
+        observed=oldest.date().isoformat() if oldest else None,
+        detail={"entries": entries},
+    )]
+
+
+def status_findings(repo: Path, has_remote: bool) -> tuple[list[dict], list[dict]]:
+    findings: list[dict] = []
+    errors: list[dict] = []
+    code, payload, message = git(repo, "status", "--porcelain=v1", "-z")
+    if code != 0:
+        errors.append({"path": str(repo), "command": "status --porcelain=v1 -z", "message": message})
+        return findings, errors
+    records = parse_status(payload)
+    untracked = [item["path"] for item in records if item["x"] == "?"]
+    deleted = [item for item in records if item["y"] == "D"]
+
+    if untracked:
+        _, wide, _ = git(repo, "status", "--porcelain=v1", "-uall", "-z")
+        blast = len([item for item in parse_status(wide) if item["x"] == "?"])
+        # Build and dependency debris is untracked too, and drowns real work if counted with it.
+        meaningful = sorted((name for name in untracked if not build_debris(name)), key=str.casefold)
+        debris = len(untracked) - len(meaningful)
+        credential_shaped = [name for name in meaningful if SENSITIVE_RE.search(Path(name).name)]
+        withheld = bool(SAMPLE_WITHHELD.search(str(repo)))
+        sample = [] if withheld else meaningful[:8]
+        if meaningful:
+            severity = severity_for("V5", {"has_remote": has_remote})
+            verb = "is" if len(meaningful) == 1 else "are"
+            evidence = (
+                plural(len(meaningful), "untracked entry", "untracked entries")
+                + f" that {verb} not build debris ({len(untracked)} total, {blast} files with -uall)"
+                + (
+                    "; filename sample withheld, this tree holds private financial or credential material"
+                    if withheld else ", e.g. " + ", ".join(sample)
+                )
+            )
+        else:
+            severity = "INFO"
+            evidence = (
+                plural(len(untracked), "untracked entry", "untracked entries")
+                + f" ({blast} files with -uall), all build or dependency shaped"
+            )
+        if credential_shaped:
+            evidence += (
+                f"; {len(credential_shaped)} credential-shaped filenames present "
+                "(names only, contents never read)"
+            )
+        findings.append(finding(
+            "V5",
+            severity,
+            evidence,
+            "Untracked files have zero protection: no history, no mirror, no reflog. Review with "
+            "`git status -uall` and copy anything valuable out of the tree before any branch "
+            "operation touches it."
+            + ("" if has_remote else " This repository has no remote at all, so nothing here exists twice."),
+            repo=str(repo),
+            detail={
+                "untracked_collapsed": len(untracked),
+                "untracked_files": blast,
+                "untracked_not_debris": len(meaningful),
+                "build_debris_entries": debris,
+                "sample": sample,
+                "sample_withheld": withheld,
+                "credential_shaped_names": len(credential_shaped),
+                "has_remote": has_remote,
+            },
+        ))
+
+    for item in deleted:
+        path = item["path"]
+        mode = ""
+        _, listed, _ = git(repo, "ls-files", "-s", "--", path)
+        if listed.strip():
+            mode = listed.split()[0]
+        if mode == "160000":
+            gitlink = listed.split()[1] if len(listed.split()) > 1 else ""
+            reachable = git(repo, "cat-file", "-e", gitlink)[0] == 0 if gitlink else False
+            findings.append(finding(
+                "V9",
+                severity_for("V9"),
+                f"submodule gitlink {gitlink[:12]} recorded at {path}, worktree missing"
+                + ("" if reachable else "; that commit is NOT in this repository's object store"),
+                "The worktree has moved, not vanished. Locate the real checkout and confirm the "
+                "recorded commit exists there with `git cat-file -t <sha>` before anyone treats "
+                "this as a deletion to be tidied up.",
+                repo=str(repo),
+                path=path,
+                detail={"gitlink": gitlink, "commit_present_locally": reachable},
+            ))
+            continue
+        if item["x"] in {"A", "M", "R", "C"}:
+            findings.append(finding(
+                "V6",
+                severity_for("V6"),
+                f"index state {item['x']}D: content staged, worktree copy gone (mode {mode or 'unknown'})",
+                "The index holds the only copy. Recover it read-only by redirecting "
+                "`git show \":<path>\"` to a file OUTSIDE this repository. Do not switch branches, "
+                "and do not let anything reset the index until that copy exists.",
+                repo=str(repo),
+                path=path,
+                detail={"index_state": item["x"] + item["y"], "mode": mode},
+            ))
+    return findings, errors
+
+
+def remote_findings(repo: Path, remotes: list[str]) -> list[dict]:
+    findings: list[dict] = []
+    if not remotes:
+        commits = out(git(repo, "rev-list", "--all", "--count"))
+        count = int(commits) if commits.isdigit() else 0
+        newest = parse_iso(out(git(repo, "log", "-1", "--format=%ci")))
+        findings.append(finding(
+            "V7",
+            severity_for("V7"),
+            f"no remote configured; this disk holds the only copy of {plural(count, 'commit')}",
+            "Every commit here is single-copy. Giving it a home on a Git server is your call and "
+            "yours alone; nothing is sent anywhere by this tool. Until you make that call, treat "
+            "the directory as irreplaceable and do not move or archive it.",
+            repo=str(repo),
+            age_days=age_days(newest),
+            observed=newest.date().isoformat() if newest else None,
+            detail={"commits": count, "remotes": []},
+        ))
+        return findings
+
+    branch = out(git(repo, "rev-parse", "--abbrev-ref", "HEAD"))
+    for remote in remotes:
+        ahead = out(git(repo, "rev-list", "--branches", "--not", f"--remotes={remote}", "--count"))
+        count = int(ahead) if ahead.isdigit() else 0
+        orphaned = False
+        if branch and branch != "HEAD":
+            tracked = f"{remote}/{branch}"
+            if git(repo, "rev-parse", "--verify", "--quiet", tracked)[0] == 0:
+                orphaned = git(repo, "merge-base", branch, tracked)[0] != 0
+        if not count and not orphaned:
+            continue
+        newest = parse_iso(out(git(
+            repo, "log", "--branches", "--not", f"--remotes={remote}", "-1", "--format=%ci"
+        )))
+        evidence = f"{plural(count, 'commit')} on local branches {'is' if count == 1 else 'are'} not on remote '{remote}'"
+        if orphaned:
+            evidence += (
+                f"; local {branch} and {remote}/{branch} share NO common ancestor "
+                "(the mirror holds an unrelated history)"
+            )
+        findings.append(finding(
+            "V7",
+            severity_for("V7"),
+            evidence,
+            "Check what the server actually holds with `git ls-remote <remote>` — refs/remotes is "
+            "a stale local cache and will happily lie. Any mirroring is your call, not the "
+            "scanner's."
+            + (" An orphaned history means a mirror push would not fast-forward; do not attempt one."
+               if orphaned else ""),
+            repo=str(repo),
+            age_days=age_days(newest),
+            observed=newest.date().isoformat() if newest else None,
+            detail={"remote": remote, "commits_not_on_remote": count, "orphaned": orphaned},
+        ))
+    return findings
+
+
+def bare_findings(repo: Path) -> list[dict]:
+    # for-each-ref does not expand %xNN the way pretty-formats do; use a literal
+    # tab, which no ref name may contain.
+    refs = out(git(repo, "for-each-ref", "--format=%(refname:short)\t%(objectname:short)\t%(committerdate:iso8601)"))
+    entries = [line.split("\t") for line in refs.splitlines() if line]
+    newest = None
+    for entry in entries:
+        if len(entry) == 3:
+            moment = parse_iso(entry[2])
+            if moment and (newest is None or moment > newest):
+                newest = moment
+    counts = out(git(repo, "count-objects", "-v"))
+    stats = dict(
+        line.split(": ", 1) for line in counts.splitlines() if ": " in line
+    )
+    sample = "; ".join(f"{entry[0]} {entry[1]}" for entry in entries[:4] if len(entry) >= 2)
+    return [finding(
+        "V10",
+        severity_for("V10"),
+        f"bare repository, {plural(len(entries), 'ref')} ({sample or 'none'}), "
+        f"{stats.get('count', '?')} loose objects, {stats.get('packs', '?')} packs",
+        "A bare repository has no working tree, so `git status` fatals and any scanner that "
+        "leads with it skips this store entirely. Inspect at object level: `git for-each-ref` "
+        "and `git log --oneline <ref>`.",
+        repo=str(repo),
+        age_days=age_days(newest),
+        observed=newest.date().isoformat() if newest else None,
+        detail={"refs": len(entries), "objects": stats},
+    )]
+
+
+def fsck_findings(repo: Path) -> list[dict]:
+    if VENDORED_HISTORY.search(str(repo)):
+        return []
+    code, payload, _ = git(repo, "fsck", "--unreachable", "--no-reflogs", "--no-progress", timeout=300)
+    if code not in {0, 1} or not payload:
+        return []
+    commits = [line.split()[-1] for line in payload.splitlines() if line.startswith("unreachable commit")]
+    if not commits:
+        return []
+    expire = out(git(repo, "config", "--get", "gc.pruneExpire")) or "2.weeks.ago (default)"
+    reflog = out(git(repo, "config", "--get", "gc.reflogExpireUnreachable")) or "30.days (default)"
+    return [finding(
+        "V4",
+        severity_for("V4"),
+        plural(len(commits), "unreachable commit") + f", e.g. {', '.join(item[:12] for item in commits[:4])}; "
+        f"gc.pruneExpire={expire}, gc.reflogExpireUnreachable={reflog}",
+        "These are real commits with no ref pointing at them and a garbage-collection clock "
+        "running. Read one with `git log -1 <sha>` and, if it matters, give it a ref yourself. "
+        "Unreachable blobs and trees without commits are rebase debris and are not counted here.",
+        repo=str(repo),
+        detail={"unreachable_commits": len(commits), "sample": [item[:12] for item in commits[:8]]},
+    )]
+
+
+def nested_findings(repos: list[dict]) -> list[dict]:
+    """A parent can be ignoring its own children, so its `git status` stays clean forever."""
+    by_path = {item["path"].resolve(): item for item in repos if not item["bare"]}
+    findings = []
+    for item in sorted(by_path.values(), key=lambda entry: str(entry["path"]).casefold()):
+        child = item["path"].resolve()
+        parent = next((ancestor for ancestor in child.parents if ancestor in by_path), None)
+        if parent is None:
+            continue
+        relative = child.relative_to(parent).as_posix()
+        code, rule, _ = git(parent, "check-ignore", "-v", "--", relative)
+        if code != 0 or not rule.strip():
+            continue
+        first = rule.strip().splitlines()[0]
+        source = first.split("\t")[0]
+        findings.append(finding(
+            "V11",
+            severity_for("V11"),
+            f"hidden from parent {parent} by {source}",
+            "The parent's `git status` will never mention this repository however dirty it gets. "
+            "Scan it directly rather than trusting the parent's clean report.",
+            repo=str(child),
+            path=relative,
+            detail={"parent": str(parent), "ignore_rule": first},
+        ))
+    return findings
+
+
+def symlink_findings(symlinks: list[Path], roots: list[Path]) -> list[dict]:
+    findings = []
+    for link in sorted(set(symlinks), key=lambda item: str(item).casefold()):
+        target = link.resolve(strict=False)
+        inside = any(target == root or root in target.parents for root in roots)
+        is_repo = (target / ".git").exists()
+        if not inside and not is_repo:
+            continue
+        findings.append(finding(
+            "V8",
+            severity_for("V8"),
+            f"{link} -> {target}"
+            + (" (target is itself a repository)" if is_repo else "")
+            + (" (target is inside a scanned root, so the tree has two identities)" if inside else ""),
+            "Recorded, not followed. Git refuses to traverse a symlinked directory: paths staged "
+            "through this alias read as worktree deletions while the index keeps a blob. Compare "
+            "the two copies before assuming the duplicate is cosmetic.",
+            path=str(link),
+            detail={"target": str(target), "target_is_repository": is_repo},
+        ))
+    return findings
+
+
+def forge_store_root(path: Path, declared: tuple[Path, ...] = ()) -> str | None:
+    """Return the forge object store a bare repository belongs to, if any.
+
+    Declared roots win over the naming convention, so a forge in an unusual
+    location can be named explicitly. With no declared roots and no
+    conventionally named directory - the ordinary case on a machine that runs
+    no forge - this returns None for everything and nothing is set aside.
+    """
+    for root in declared:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        return str(root).rstrip("/") or str(root)
+    match = FORGE_STORE.search(str(path))
+    return str(path)[: match.end()].rstrip("/") if match else None
+
+
+def partition_forge_stores(
+    repositories: list[dict],
+    declared: tuple[Path, ...] = (),
+) -> tuple[list[dict], dict[str, int], list[dict]]:
+    """Set a Git forge's own bare mirrors aside: they are the destination, not the risk."""
+    active: list[dict] = []
+    stores: Counter = Counter()
+    for entry in repositories:
+        store = forge_store_root(entry["path"], declared) if entry["bare"] else None
+        if store is None:
+            active.append(entry)
+        else:
+            stores[store] += 1
+    findings = [
+        finding(
+            "V10",
+            severity_for("V10"),
+            f"{plural(count, 'bare repository', 'bare repositories')} in a Git forge object store",
+            "This is a forge's own storage: the place mirrors land, not work waiting to be "
+            "mirrored. Its repositories were catalogued and not evaluated as single-copy work. "
+            "Inspect one directly with `git for-each-ref` if you need to confirm a mirror landed.",
+            repo=store,
+            detail={"bare_repositories": count, "evaluated": False},
+        )
+        for store, count in sorted(stores.items())
+    ]
+    return active, dict(sorted(stores.items())), findings
+
+
+def inspect_repository(entry: dict, run_fsck: bool) -> tuple[list[dict], list[dict], list[str]]:
+    repo = entry["path"]
+    findings: list[dict] = []
+    errors: list[dict] = []
+    remote_lines = out(git(repo, "remote", "-v")).splitlines()
+    remotes = sorted({line.split()[0] for line in remote_lines if line.split()})
+    if entry["bare"]:
+        findings.extend(bare_findings(repo))
+    else:
+        status, status_errors = status_findings(repo, bool(remotes))
+        findings.extend(status)
+        errors.extend(status_errors)
+    findings.extend(stash_findings(repo))
+    findings.extend(remote_findings(repo, remotes))
+    if run_fsck:
+        findings.extend(fsck_findings(repo))
+    return findings, errors, [redact_remote(line) for line in remote_lines]
+
+
+def scan(
+    supplied: list[Path],
+    max_depth: int = 6,
+    shelf_max_depth: int = 12,
+    include_vendor_shelves: bool = False,
+    run_fsck: bool = False,
+    jobs: int = 8,
+    caches_root: Path | list[Path] | None = None,
+    forge_roots: list[Path] | None = None,
+) -> dict:
+    # Nothing machine-specific is assumed. An explicit caches_root (one path or
+    # several) wins; otherwise the platform's own locations are discovered.
+    if caches_root is None:
+        cache_roots = jetbrains_cache_roots()
+    elif isinstance(caches_root, (str, Path)):
+        cache_roots = [Path(caches_root)]
+    else:
+        cache_roots = [Path(item) for item in caches_root]
+    declared_forges = tuple(
+        Path(os.path.abspath(Path(item).expanduser()))
+        for item in (forge_roots if forge_roots is not None else env_paths(FORGE_ROOTS_ENV))
+    )
+    roots, findings = dedupe_roots(supplied)
+    excluded: Counter = Counter()
+    symlinks: list[Path] = []
+    candidates: list[Path] = []
+    shelf_hits: list[dict] = []
+
+    for root in roots:
+        directories, root_symlinks, root_excluded = walk(root, max_depth, PRUNE_NAMES)
+        candidates.extend(candidate_repositories(directories))
+        symlinks.extend(root_symlinks)
+        excluded.update(root_excluded)
+        shelf_hits.extend(shelf_patches(root, shelf_max_depth, include_vendor_shelves))
+
+    findings.extend(shelf_findings(shelf_hits))
+    findings.extend(symlink_findings(symlinks, roots))
+
+    discovered, errors = resolve_repositories(candidates)
+    repositories, forge_stores, forge_findings = partition_forge_stores(discovered, declared_forges)
+    findings.extend(forge_findings)
+    remotes_by_repo: dict[str, list[str]] = {}
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        results = list(pool.map(lambda item: inspect_repository(item, run_fsck), repositories))
+    for entry, (repo_findings, repo_errors, remote_lines) in zip(repositories, results):
+        findings.extend(repo_findings)
+        errors.extend(repo_errors)
+        remotes_by_repo[str(entry["path"])] = remote_lines
+
+    findings.extend(nested_findings(repositories))
+    present_caches = [root for root in cache_roots if root.is_dir()]
+    for root in present_caches:
+        findings.extend(local_history_findings(root))
+
+    findings.sort(key=lambda item: (
+        SEVERITY_RANK[item["severity"]],
+        item["vector"],
+        (item["repo"] or item["path"] or "").casefold(),
+        (item["path"] or "").casefold(),
+    ))
+
+    by_severity = Counter(item["severity"] for item in findings)
+    by_vector = Counter(item["vector"] for item in findings)
+    affected = {item["repo"] for item in findings if item["repo"]}
+    bare = sum(1 for item in repositories if item["bare"])
+
+    warnings = []
+    if by_severity["CRITICAL"]:
+        warnings.append(
+            f"{by_severity['CRITICAL']} findings are the only copy of real work and are invisible "
+            "to git status."
+        )
+    if not present_caches:
+        warnings.append(
+            "No JetBrains cache directory was found on this machine, so IDE local history (V2) "
+            f"was not evaluated. Locations checked: {', '.join(str(root) for root in cache_roots)}. "
+            f"Point --jetbrains-caches or {JETBRAINS_CACHES_ENV} at the real one if it lives "
+            "somewhere else."
+        )
+    if not include_vendor_shelves:
+        warnings.append(
+            "Vendor trees were not searched for JetBrains shelves, so a shelf inside "
+            "node_modules, vendor, .pnpm or bower_components would not be reported. Re-run with "
+            "--include-vendor-shelves to cover them."
+        )
+    if not run_fsck:
+        warnings.append(
+            "Unreachable-commit detection (V4) did not run; it is the most expensive pass. "
+            "Re-run with --fsck to include it."
+        )
+    if excluded["depth_limit"]:
+        warnings.append(
+            f"{excluded['depth_limit']} directories were not entered at --max-depth {max_depth}; "
+            "repositories below that depth are absent from this report, not proven absent."
+        )
+    if errors:
+        warnings.append(
+            f"{len(errors)} Git inspections failed and are listed in `errors`; those "
+            "repositories were skipped, not cleared."
+        )
+    if bare:
+        warnings.append(
+            f"{bare} bare repositories were inspected at object level; working-tree vectors do "
+            "not apply to them and were not evaluated."
+        )
+    if forge_stores:
+        total = sum(forge_stores.values())
+        warnings.append(
+            f"{total} bare repositories across {plural(len(forge_stores), 'forge object store')} "
+            "were catalogued but not evaluated as work at risk: a forge store is where mirrors "
+            "land. Confirm a specific mirror landed with `git ls-remote`, not with this scan."
+        )
+
+    return {
+        "schema_version": 1,
+        "read_only": True,
+        "generated_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
+        "roots": [str(root) for root in roots],
+        "scan_policy": {
+            "max_depth": max_depth,
+            "shelf_max_depth": shelf_max_depth,
+            "include_vendor_shelves": include_vendor_shelves,
+            "fsck": run_fsck,
+            "jobs": jobs,
+            "jetbrains_cache_roots": [str(root) for root in cache_roots],
+            "jetbrains_cache_roots_present": [str(root) for root in present_caches],
+            "declared_forge_roots": [str(root) for root in declared_forges],
+            "pruned_directories": sorted(PRUNE_NAMES),
+            "shelf_pruned_directories": sorted(
+                SHELF_PRUNE if include_vendor_shelves else SHELF_PRUNE | VENDOR_NAMES
+            ),
+        },
+        "repositories_discovered": len(discovered),
+        "repositories_inspected": len(repositories),
+        "bare_repositories": bare,
+        "forge_stores": forge_stores,
+        "remotes": dict(sorted(remotes_by_repo.items())),
+        "findings": findings,
+        "errors": sorted(errors, key=lambda item: item["path"].casefold()),
+        "excluded_from_traversal": dict(sorted(excluded.items())),
+        "summary": {
+            "findings": len(findings),
+            "by_severity": dict(sorted(by_severity.items(), key=lambda pair: SEVERITY_RANK[pair[0]])),
+            "by_vector": dict(sorted(by_vector.items(), key=lambda pair: int(pair[0][1:]))),
+            "repositories_with_findings": len(affected),
+        },
+        "warnings": warnings,
+    }
+
+
+def render_text(report: dict) -> str:
+    lines = ["=== warrior scan — what could I lose right now? ===", ""]
+    lines.append(f"generated   {report['generated_at']}")
+    lines.append(f"roots       {', '.join(report['roots'])}")
+    policy = report["scan_policy"]
+    lines.append(
+        f"policy      depth {policy['max_depth']}, shelf depth {policy['shelf_max_depth']}, "
+        f"jobs {policy['jobs']}, fsck {'on' if policy['fsck'] else 'off'}, "
+        f"vendor shelves {'included' if policy['include_vendor_shelves'] else 'skipped'}"
+    )
+    forge = sum(report["forge_stores"].values())
+    lines.append(
+        f"scanned     {report['repositories_inspected']} repositories "
+        f"({report['bare_repositories']} bare), "
+        f"{report['summary']['repositories_with_findings']} with findings"
+        + (f"; {forge} forge-store mirrors catalogued, not evaluated" if forge else "")
+    )
+    severities = report["summary"]["by_severity"]
+    lines.append(
+        "findings    " + (
+            ", ".join(f"{name} {count}" for name, count in severities.items()) or "none"
+        )
+    )
+    lines.append("")
+
+    for severity in ("CRITICAL", "HIGH", "MEDIUM", "INFO"):
+        group = [item for item in report["findings"] if item["severity"] == severity]
+        if not group:
+            continue
+        lines.append(f"-- {severity} ({len(group)}) — {SEVERITY_MEANING[severity]} --")
+        for item in group:
+            location = item["repo"] or item["path"] or "(machine)"
+            lines.append(f"  [{item['vector']} {item['vector_name']}] {location}")
+            if item["repo"] and item["path"]:
+                lines.append(f"      at       {item['path']}")
+            lines.append(f"      evidence {item['evidence']}")
+            if item["age_days"] is not None:
+                stamp = f" ({item['observed']})" if item["observed"] else ""
+                lines.append(f"      age      {item['age_days']} days{stamp}")
+            lines.append(f"      next     {item['next_step']}")
+        lines.append("")
+
+    if report["errors"]:
+        lines.append(f"-- inspection errors ({len(report['errors'])}) --")
+        for item in report["errors"]:
+            lines.append(f"  {item['path']}: {item['command']} -> {item['message']}")
+        lines.append("")
+
+    if report["warnings"]:
+        lines.append("-- scan boundaries --")
+        for warning in report["warnings"]:
+            lines.append(f"  * {warning}")
+        lines.append("")
+
+    lines.append("Read-only report. Every suggested next step above is also read-only;")
+    lines.append("recovering or mirroring anything is your decision, not this tool's.")
+    lines.append("Vectors, guards and hard-won rules ported from Moof (moof-git-loss-scan).")
+    return "\n".join(lines) + "\n"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="warrior-scan",
+        description="Read-only work-loss scan across project roots: what could I lose right now?",
+    )
+    parser.add_argument("roots", nargs="+", type=Path)
+    parser.add_argument("--max-depth", type=int, default=6, help="repository discovery depth")
+    parser.add_argument("--shelf-max-depth", type=int, default=12, help="JetBrains shelf discovery depth")
+    parser.add_argument("--include-vendor-shelves", action="store_true",
+                        help="also search node_modules/vendor trees for JetBrains shelves")
+    parser.add_argument("--fsck", action="store_true",
+                        help="include unreachable-commit detection (V4); the slowest pass")
+    parser.add_argument("--jobs", type=int, default=8, help="parallel repository inspections")
+    parser.add_argument("--jetbrains-caches", type=Path, action="append", metavar="DIR",
+                        help="JetBrains cache directory to inspect for IDE local history; "
+                             "repeatable. Default: discovered for this platform "
+                             f"(override with {JETBRAINS_CACHES_ENV})")
+    parser.add_argument("--forge-root", type=Path, action="append", metavar="DIR",
+                        help="a Git forge's own object store, whose bare repositories are the "
+                             "mirror destination rather than work at risk; repeatable. Default: "
+                             "directories named gitea/gitea-repositories/forgejo/gogs "
+                             f"(override with {FORGE_ROOTS_ENV})")
+    parser.add_argument("--min-severity", choices=("CRITICAL", "HIGH", "MEDIUM", "INFO"),
+                        default="INFO", help="hide findings below this severity")
+    parser.add_argument("--json", action="store_true", help="emit the machine-readable report")
+    parser.add_argument("--output", type=Path,
+                        help="write the report to this file instead of stdout; the only write this tool performs. "
+                             "Refuses to overwrite an existing file, refuses any path inside a .git directory, "
+                             "and will not create missing parent directories")
+    parser.add_argument("--force", action="store_true",
+                        help="with --output, allow replacing an existing file")
+    args = parser.parse_args()
+    if args.max_depth < 1 or args.max_depth > 12:
+        parser.error("--max-depth must be between 1 and 12")
+    if args.shelf_max_depth < 1 or args.shelf_max_depth > 20:
+        parser.error("--shelf-max-depth must be between 1 and 20")
+    if args.jobs < 1 or args.jobs > 32:
+        parser.error("--jobs must be between 1 and 32")
+    for supplied in args.roots:
+        if not supplied.expanduser().is_dir():
+            parser.error(f"not a directory: {supplied}")
+
+    report = scan(
+        args.roots,
+        max_depth=args.max_depth,
+        shelf_max_depth=args.shelf_max_depth,
+        include_vendor_shelves=args.include_vendor_shelves,
+        run_fsck=args.fsck,
+        jobs=args.jobs,
+        caches_root=args.jetbrains_caches,
+        forge_roots=args.forge_root,
+    )
+    ceiling = SEVERITY_RANK[args.min_severity]
+    if ceiling < SEVERITY_RANK["INFO"]:
+        report["findings"] = [
+            item for item in report["findings"] if SEVERITY_RANK[item["severity"]] <= ceiling
+        ]
+        report["warnings"].append(
+            f"Findings below {args.min_severity} were filtered out of this view; the counts in "
+            "`summary` still describe the whole scan."
+        )
+
+    payload = (
+        json.dumps(report, indent=2, sort_keys=True) + "\n" if args.json else render_text(report)
+    )
+    if args.output:
+        # A tool whose whole purpose is preventing work loss must not destroy
+        # work itself. An adversarial audit of this file overwrote a real
+        # repository's .git/HEAD via a mistyped --output and broke the repo.
+        # Refuse to clobber, refuse to write inside .git, and never mkdir -p
+        # arbitrary trees.
+        destination = args.output.expanduser()
+        if any(part == ".git" for part in destination.parts):
+            print(f"refusing to write inside a .git directory: {destination}",
+                  file=sys.stderr)
+            return 2
+        if destination.exists() and not args.force:
+            print(f"refusing to overwrite existing file: {destination}\n"
+                  f"  pass --force if you really mean to replace it",
+                  file=sys.stderr)
+            return 2
+        if not destination.parent.is_dir():
+            print(f"refusing to create directory tree for: {destination.parent}\n"
+                  f"  create it yourself if that is genuinely what you want",
+                  file=sys.stderr)
+            return 2
+        destination.write_text(payload)
+    else:
+        print(payload, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

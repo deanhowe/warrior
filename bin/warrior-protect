@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""Give an unprotected local repository a verified home on a git server.
+
+Why this exists
+---------------
+On the machine this was built for, 50 repositories had no remote at all: no
+mirror, no off-machine copy, nothing but the working tree. Doing something
+about one of them by hand means create the repo on the server, pick a name
+that will not collide, decide push-target vs pull-mirror, add a remote, push,
+verify. That is enough friction that it never happens. This makes it one
+command - and proves the result instead of assuming it.
+
+Push target, never a pull-mirror
+--------------------------------
+Repositories created here are ORDINARY repositories. A pull-mirror is
+overwritten from its upstream on a schedule, so anything pushed directly into
+one is destroyed on the next sync. If a repository of the target name already
+exists AND is a pull-mirror, this tool refuses.
+
+Transport: SSH, never a filesystem path
+---------------------------------------
+A filesystem path is read-only against Gitea - ls-remote, clone and fetch work,
+but a push is rejected by the pre-receive hook. Worse: a filesystem push into
+an ALREADY UP-TO-DATE repository exits 0 having sent nothing, so it looks like
+it worked. Transport is validated as SSH, and success is confirmed by finding
+the local HEAD among the server's refs - never by exit code 0.
+
+Honest about what this buys you
+-------------------------------
+If the server's bare repositories live on the same physical volume as the
+working trees, this protects against a deleted working tree, a bad checkout or
+a lost branch. It is NOT off-machine redundancy. And a remote protects
+COMMITTED OBJECTS ONLY - shelves, index state, stashes, untracked files and
+dangling objects have zero protection from it.
+
+Safety contract
+---------------
+Never deletes, never force-pushes, never rewrites history, never touches an
+existing remote, and refuses to push into a pull-mirror. Dry run by default:
+nothing happens without --apply.
+
+Configuration (no values are ever guessed)
+------------------------------------------
+    WARRIOR_GIT_SSH    ssh://git@git.example.internal:2222
+    WARRIOR_GIT_API    https://git.example.internal/api/v1
+    WARRIOR_GIT_OWNER  the owner/namespace to create repositories under
+    WARRIOR_SCAN_ROOT  root to scan, and the root repo names flatten against
+    WARRIOR_GIT_BARE_ROOT  optional; only if the bare repos are on this machine
+  ...or the same keys in ~/.warrior/config.json. The API token comes from
+  $WARRIOR_GIT_TOKEN or the OS keychain - never a file, never a URL.
+
+Usage
+-----
+    warrior-protect --unprotected                 # list candidates, then stop
+    warrior-protect ~/code/thing                  # dry run: show the plan
+    warrior-protect ~/code/thing --apply          # create, wire, push, verify
+    warrior-protect --print-config                # what is configured, and from where
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import Any
+
+_LIB = Path(__file__).resolve().parent.parent / "lib"
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+try:
+    from warrior_forge import (  # noqa: E402
+        ConfigError, Settings, TransportError, UnsafeGitCommand,
+        api, authenticated_login, forge_token, git, head_landed, join_ssh_url,
+        repo_name_for, sanitise_output, validate_ssh_transport,
+    )
+except ImportError as error:  # pragma: no cover - packaging failure
+    raise SystemExit(f"warrior-protect: cannot import shared library from {_LIB}: {error}")
+
+SKIP_DIRECTORIES = {"node_modules", "vendor", "target", "dist", ".venv", "venv",
+                    "Pods", ".Trash", "site-packages"}
+
+
+# ---------------------------------------------------------------------------
+# Pure decision logic (unit-tested; no network, no filesystem)
+# ---------------------------------------------------------------------------
+
+def decide_action(commits: int, remote_name: str, existing_remotes: list[str],
+                  mirror_state: bool | None) -> tuple[str, str]:
+    """Decide what to do with one repository.
+
+    mirror_state: True  - a pull-mirror of this name exists on the server
+                  False - an ordinary repository of this name exists
+                  None  - no repository of this name exists
+    Returns (action, reason). Actions: skip, refuse, create-and-push, wire-and-push.
+    """
+    if commits <= 0:
+        return "skip", "no commits yet - nothing to protect; commit first"
+    if mirror_state is True:
+        return "refuse", ("a PULL-MIRROR of this name exists on the server; anything "
+                          "pushed into it is destroyed on the next sync")
+    if remote_name in existing_remotes:
+        return "skip", f"local remote '{remote_name}' is already configured"
+    if mirror_state is None:
+        return "create-and-push", "create an ordinary (non-mirror) repository and push"
+    return "wire-and-push", "repository already exists on the server; wire the remote and push"
+
+
+def describe_result(landed: bool, commits: int, ref_count: int, local_head: str) -> str:
+    """Report success only when the local HEAD was actually found on the server."""
+    if landed:
+        return (f"protected - {commits} commits, {ref_count} refs on the server, "
+                "HEAD confirmed present")
+    return (f"UNVERIFIED - the push reported success but local HEAD {local_head[:10]} "
+            f"was not found among {ref_count} server refs. Do not trust this as a copy.")
+
+
+# ---------------------------------------------------------------------------
+# Inspection and planning
+# ---------------------------------------------------------------------------
+
+def inspect(repo: Path, scan_root: Path | None) -> dict[str, Any]:
+    record: dict[str, Any] = {"repo": str(repo), "name": repo_name_for(repo, scan_root)}
+    code, out, _ = git(repo, "rev-list", "--count", "HEAD")
+    record["commits"] = int(out) if code == 0 and out.isdigit() else 0
+    _, out, _ = git(repo, "remote")
+    record["existing_remotes"] = out.split() if out else []
+    _, out, _ = git(repo, "branch", "--show-current")
+    record["branch"] = out or "(detached)"
+    _, out, _ = git(repo, "status", "--porcelain")
+    record["dirty_entries"] = len(out.splitlines()) if out else 0
+    return record
+
+
+def repository_state(api_base: str, owner: str, name: str, token: str) -> bool | None:
+    """True if a pull-mirror exists, False if an ordinary repo exists, None if absent."""
+    status, body = api(api_base, f"/repos/{owner}/{name}", token)
+    if status == 404:
+        return None
+    if status == 200 and isinstance(body, dict):
+        return bool(body.get("mirror"))
+    raise RuntimeError(f"cannot determine repository state (HTTP {status}): {body}")
+
+
+def plan(repo: Path, settings: Settings, token: str) -> dict[str, Any]:
+    api_base = settings.require("git_api", "ask the server whether this repository exists")
+    owner = settings.require("git_owner", "know which namespace to create the repository in")
+    ssh_base = settings.require("git_ssh", "build an SSH remote URL to push over")
+    remote_name = settings.get("remote_name")
+    scan_root = settings.get("scan_root")
+
+    record = inspect(repo, Path(scan_root) if scan_root else None)
+    try:
+        mirror_state = repository_state(api_base, owner, record["name"], token)
+        record["state_known"] = True
+    except RuntimeError as error:
+        # Unknown state is not permission to proceed: pushing blind could land
+        # in a pull-mirror and be wiped on its next sync.
+        record["state_known"] = False
+        record["action"] = "refuse"
+        record["reason"] = f"{error} - refusing to act without knowing if it is a pull-mirror"
+        record["remote_url"] = join_ssh_url(ssh_base, owner, record["name"])
+        return record
+
+    record["remote_exists"] = mirror_state is not None
+    record["remote_is_pull_mirror"] = mirror_state
+    record["action"], record["reason"] = decide_action(
+        record["commits"], remote_name, record["existing_remotes"], mirror_state)
+    record["remote_url"] = join_ssh_url(ssh_base, owner, record["name"])
+    bare_root = settings.get("bare_root")
+    record["bare_path"] = str(Path(bare_root) / owner / f"{record['name']}.git") if bare_root else None
+    return record
+
+
+def execute(record: dict[str, Any], settings: Settings, token: str) -> dict[str, Any]:
+    repo = Path(record["repo"])
+    name = record["name"]
+    api_base = settings.get("git_api")
+    owner = settings.get("git_owner")
+    remote_name = settings.get("remote_name")
+
+    try:
+        remote_url = validate_ssh_transport(record["remote_url"])
+    except TransportError as error:
+        record["result"] = f"FAILED: {error}"
+        return record
+
+    if record["action"] == "create-and-push":
+        login = authenticated_login(api_base, token)
+        path = "/user/repos" if login and login.lower() == str(owner).lower() \
+            else f"/orgs/{owner}/repos"
+        status, body = api(api_base, path, token, "POST", {
+            "name": name,
+            "private": True,
+            "auto_init": False,
+            "description": f"Warrior home for {record['repo']}",
+        })
+        if status not in (200, 201):
+            record["result"] = f"FAILED to create repository: HTTP {status} {body}"
+            return record
+
+    # Belt and braces: re-read the repository and refuse if it is a mirror.
+    # Between planning and now, or via a name collision, it could have become one.
+    try:
+        if repository_state(api_base, owner, name, token) is True:
+            record["result"] = ("REFUSED: the server repository is a pull-mirror; "
+                                "pushing into it would be overwritten on the next sync")
+            return record
+    except RuntimeError as error:
+        record["result"] = f"REFUSED: {error}"
+        return record
+
+    bare_path = record.get("bare_path")
+    if bare_path and not Path(bare_path).exists():
+        record["result"] = f"FAILED: bare repository not found at {bare_path}"
+        return record
+
+    code, _, err = git(repo, "remote", "add", remote_name, remote_url)
+    if code != 0:
+        record["result"] = f"FAILED to add remote: {sanitise_output(err, token)[:160]}"
+        return record
+
+    # Every branch and tag. No --force anywhere; assert_safe_git would refuse it.
+    code, _, err = git(repo, "push", remote_name, "--all")
+    if code != 0:
+        record["result"] = f"FAILED to push branches: {sanitise_output(err, token)[:200]}"
+        return record
+    git(repo, "push", remote_name, "--tags")
+
+    # Verify against the server, not against the exit code: a push with nothing
+    # to send also exits 0.
+    _, refs_output, _ = git(repo, "ls-remote", remote_name)
+    _, local_head, _ = git(repo, "rev-parse", "HEAD")
+    landed = head_landed(refs_output, local_head)
+    record["verified_refs"] = len(refs_output.splitlines()) if refs_output else 0
+    record["head_on_server"] = landed
+    record["result"] = describe_result(landed, record["commits"],
+                                       record["verified_refs"], local_head)
+    return record
+
+
+def find_unprotected(roots: list[Path]) -> list[Path]:
+    """Repositories with no remote at all. Read-only."""
+    found: list[Path] = []
+    for root in roots:
+        for gitdir in sorted(root.rglob(".git")):
+            if any(part in SKIP_DIRECTORIES for part in gitdir.parts):
+                continue
+            repo = gitdir.parent
+            code, out, _ = git(repo, "remote")
+            if code == 0 and not out:
+                found.append(repo)
+    return found
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="warrior-protect", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("repos", nargs="*", type=Path, help="repositories to protect")
+    parser.add_argument("--apply", action="store_true",
+                        help="actually create, wire and push (default is a dry run)")
+    parser.add_argument("--unprotected", action="store_true",
+                        help="list repositories with no remote at all, then exit")
+    parser.add_argument("--config", type=Path, help="path to a config JSON file")
+    parser.add_argument("--remote-name", help="override the remote name to add")
+    parser.add_argument("--scan-root", type=Path,
+                        help="root to scan and to flatten repository names against")
+    parser.add_argument("--print-config", action="store_true",
+                        help="show resolved configuration and where each value came from")
+    arguments = parser.parse_args()
+
+    try:
+        settings = Settings.load(arguments.config)
+        if arguments.remote_name:
+            settings.data["remote_name"] = arguments.remote_name
+        if arguments.scan_root:
+            settings.data["scan_root"] = str(arguments.scan_root)
+
+        if arguments.print_config:
+            print(f"config file: {settings.source} "
+                  f"({'present' if settings.source and settings.source.exists() else 'absent'})")
+            for name, value, source in settings.describe():
+                print(f"  {name:<18} {value:<52} [{source}]")
+            print("  token              (never displayed)"
+                  "                                 [keychain or $WARRIOR_GIT_TOKEN]")
+            return 0
+
+        if arguments.unprotected:
+            roots = [path.expanduser().resolve() for path in arguments.repos]
+            if not roots:
+                configured = settings.require(
+                    "scan_root", "know which directory to scan for repositories")
+                roots = [Path(configured).expanduser().resolve()]
+            for repo in find_unprotected(roots):
+                print(repo)
+            return 0
+
+        if not arguments.repos:
+            parser.error("give one or more repository paths, or use --unprotected")
+
+        token = forge_token(settings)
+        records = [plan(path.expanduser().resolve(), settings, token)
+                   for path in arguments.repos]
+    except (ConfigError, TransportError, UnsafeGitCommand) as error:
+        print(f"warrior-protect: {error}", file=sys.stderr)
+        return 2
+
+    for record in records:
+        print(f"\n{record['repo']}")
+        print(f"  server name   {record['name']}")
+        print(f"  commits       {record['commits']}   branch {record['branch']}"
+              f"   uncommitted entries {record['dirty_entries']}")
+        print(f"  remote url    {record['remote_url']}")
+        if record.get("bare_path") is None:
+            print("  bare path     (not configured - set WARRIOR_GIT_BARE_ROOT if the "
+                  "server's bare repos are on this machine)")
+        print(f"  action        {record['action'].upper()} - {record['reason']}")
+        if arguments.apply and record["action"] in {"create-and-push", "wire-and-push"}:
+            try:
+                execute(record, settings, token)
+            except (ConfigError, TransportError, UnsafeGitCommand) as error:
+                record["result"] = f"FAILED: {error}"
+            print(f"  result        {record['result']}")
+
+    actionable = sum(1 for record in records
+                     if record["action"] in {"create-and-push", "wire-and-push"})
+    if not arguments.apply:
+        print(f"\nDRY RUN - {actionable} repository(ies) would be protected. "
+              "Re-run with --apply.")
+    else:
+        unverified = sum(1 for record in records
+                         if record.get("result", "").startswith(("UNVERIFIED", "FAILED", "REFUSED")))
+        print(f"\n{actionable - unverified} of {actionable} verified on the server. "
+              "A remote protects COMMITTED OBJECTS ONLY - shelves, stashes, index "
+              "state and untracked files are still unprotected.")
+        if unverified:
+            return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,580 @@
+#!/usr/bin/env python3
+"""Classify the repositories on a git server by PURPOSE, and optionally record
+that classification as topics.
+
+Why this exists
+---------------
+A forge full of repositories tells you where each one came *from* - never what
+it is *for*. Mirrors of other people's code sit beside first-party products,
+publishable packages and dormant history, with no way to tell them apart. That
+makes "push everything to the server" ambiguous: the right policy for a
+first-party product is not the right policy for a vendored upstream mirror.
+
+The mistake this encodes
+------------------------
+Gitea's `is_mirror` is a SYNC MECHANISM - "this forge pulls this repository
+from somewhere" - NOT ownership. Your own repositories get mirrored in too.
+Conflating the two mislabelled 72 first-party repositories on the source
+machine, the flagship product among them, as though they were somebody else's
+code. So ownership is decided by the mirror's SOURCE, matched against remotes
+you declare as your own; and purpose and sync mechanism are recorded as
+SEPARATE topics, because a repository can legitimately be both first-party and
+a pull-mirror.
+
+Where the evidence comes from
+-----------------------------
+    --source sqlite   a local Gitea gitea.db, opened strictly read-only
+    --source api      the forge HTTP API (works against a remote server)
+    --source auto     sqlite if it is configured and present, otherwise api
+If neither is available the tool says exactly what to configure and stops.
+
+Safety contract
+---------------
+NEVER moves, renames, transfers or deletes a repository, and never writes to
+the forge database. Adding a topic is additive and reversible: it creates
+metadata beside the repository and changes no clone URL, no file, no history.
+Repository transfer is deliberately not implemented - it moves directories on
+disk and rewrites remote URLs, which belongs in a separate, reviewed operation.
+Dry run by default: nothing is written without --apply.
+
+Usage
+-----
+    warrior-classify                          # dry run, human table
+    warrior-classify --json                   # dry run, machine output
+    warrior-classify --output report.json     # write the manifest
+    warrior-classify --apply                  # add topics via the API (opt-in)
+    warrior-classify --print-config           # what is configured, and from where
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sqlite3
+import sys
+from pathlib import Path
+from typing import Any
+
+_LIB = Path(__file__).resolve().parent.parent / "lib"
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+try:
+    from warrior_forge import (  # noqa: E402
+        ConfigError, Settings, api, flatten_path, forge_token,
+        redact_url_userinfo, safe_output_path,
+    )
+except ImportError as error:  # pragma: no cover - packaging failure
+    raise SystemExit(f"warrior-classify: cannot import shared library from {_LIB}: {error}")
+
+# Purpose vocabulary. Deliberately small: a purpose answers "what policy applies
+# to this repository", not "what technology is inside it".
+PURPOSES = {
+    "first-party": "Your own source. Push always; this is the work.",
+    "mirror": "A copy of code owned elsewhere. Preserve; never the source of truth.",
+    "package": "Published or publishable artifact (composer/npm/cargo registry).",
+    "archive": "Dormant or historical. Preserve; do not treat as current.",
+    "unclassified": "Evidence was insufficient. Left alone deliberately.",
+}
+CONFIDENCES = {"high", "medium", "low", "none"}
+
+# Topics must be lowercase alphanumeric with hyphens, <= 35 characters.
+TOPIC_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,34}$")
+
+DEFAULT_IDENTITY_QUERY = (
+    "SELECT path, kironexus_status FROM project_metadata "
+    "WHERE kironexus_status IS NOT NULL AND kironexus_status <> ''"
+)
+
+
+# ---------------------------------------------------------------------------
+# Rules - every machine-specific judgement lives in configuration, not in code
+# ---------------------------------------------------------------------------
+
+class Rules:
+    """Classification rules loaded from config or a --rules file."""
+
+    def __init__(self, own_remotes: list[re.Pattern] | None = None,
+                 regions: list[dict[str, Any]] | None = None,
+                 identity_overrides: dict[str, dict[str, str]] | None = None,
+                 known_purpose: dict[str, dict[str, str]] | None = None) -> None:
+        self.own_remotes = own_remotes or []
+        # Longest prefix first, so rule order in the file cannot cause a short
+        # prefix ("herd-") to shadow a longer one ("herd-packages-").
+        self.regions = sorted(regions or [], key=lambda rule: -len(rule["prefix"]))
+        self.identity_overrides = identity_overrides or {}
+        self.known_purpose = known_purpose or {}
+
+    @classmethod
+    def from_mapping(cls, data: dict[str, Any], source: str = "rules") -> "Rules":
+        def check_purpose(value: str, where: str) -> str:
+            if value not in PURPOSES:
+                raise ConfigError(f"{source}: unknown purpose {value!r} at {where}; "
+                                  f"valid purposes are {', '.join(sorted(PURPOSES))}")
+            return value
+
+        def check_confidence(value: str, where: str) -> str:
+            if value not in CONFIDENCES:
+                raise ConfigError(f"{source}: unknown confidence {value!r} at {where}; "
+                                  f"valid values are {', '.join(sorted(CONFIDENCES))}")
+            return value
+
+        patterns = []
+        for raw in data.get("own_remotes") or []:
+            try:
+                patterns.append(re.compile(raw, re.IGNORECASE))
+            except re.error as error:
+                raise ConfigError(f"{source}: own_remotes entry {raw!r} is not a "
+                                  f"valid regex: {error}") from None
+
+        regions = []
+        for index, rule in enumerate(data.get("regions") or []):
+            where = f"regions[{index}]"
+            if not isinstance(rule, dict) or not rule.get("prefix"):
+                raise ConfigError(f"{source}: {where} needs at least a 'prefix'")
+            regions.append({
+                "prefix": str(rule["prefix"]).lower(),
+                "region": str(rule.get("region") or rule["prefix"]).strip("-_").lower(),
+                "purpose": check_purpose(rule.get("purpose", "unclassified"), where),
+                "confidence": check_confidence(rule.get("confidence", "medium"), where),
+            })
+
+        overrides = {}
+        for status, rule in (data.get("identity_overrides") or {}).items():
+            where = f"identity_overrides[{status!r}]"
+            if isinstance(rule, str):
+                rule = {"purpose": rule}
+            overrides[str(status).lower()] = {
+                "purpose": check_purpose(rule.get("purpose", "unclassified"), where),
+                "confidence": check_confidence(rule.get("confidence", "medium"), where),
+            }
+
+        known = {}
+        for name, rule in (data.get("known_purpose") or {}).items():
+            where = f"known_purpose[{name!r}]"
+            if isinstance(rule, (list, tuple)):
+                rule = {"purpose": rule[0], "reason": rule[1] if len(rule) > 1 else ""}
+            elif isinstance(rule, str):
+                rule = {"purpose": rule, "reason": ""}
+            known[str(name).lower()] = {
+                "purpose": check_purpose(rule.get("purpose", "unclassified"), where),
+                "reason": str(rule.get("reason") or "explicit judgement"),
+            }
+
+        return cls(patterns, regions, overrides, known)
+
+    @classmethod
+    def load(cls, settings: Settings, rules_path: Path | None = None) -> "Rules":
+        if rules_path:
+            try:
+                data = json.loads(Path(rules_path).expanduser().read_text())
+            except (OSError, ValueError) as error:
+                raise ConfigError(f"cannot read rules file {rules_path}: {error}") from None
+            return cls.from_mapping(data, str(rules_path))
+        return cls.from_mapping({
+            "own_remotes": settings.get("own_remotes") or [],
+            "regions": settings.get("regions") or [],
+            "identity_overrides": settings.get("identity_overrides") or {},
+            "known_purpose": settings.get("known_purpose") or {},
+        }, str(settings.source or "configuration"))
+
+    def region_for(self, lower_name: str) -> dict[str, Any] | None:
+        for rule in self.regions:
+            if lower_name.startswith(rule["prefix"]):
+                return rule
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Classification (pure; unit-tested)
+# ---------------------------------------------------------------------------
+
+def classify(repo: dict[str, Any], identities: dict[str, str], rules: Rules) -> dict[str, Any]:
+    """Derive a purpose plus the evidence that produced it.
+
+    Evidence travels with every verdict so a human can audit why a repository
+    was labelled, rather than trusting an opaque answer.
+    """
+    name = str(repo.get("lower_name") or repo.get("name") or "").lower()
+    region_rule = rules.region_for(name)
+    region = region_rule["region"] if region_rule else "unknown"
+    evidence: list[str] = [f"region={region}"]
+
+    def verdict(purpose: str, confidence: str) -> dict[str, Any]:
+        return {"purpose": purpose, "region": region, "evidence": evidence,
+                "confidence": confidence}
+
+    # is_mirror is the SYNC MECHANISM, not ownership. Ownership comes from the
+    # mirror's source address, matched against remotes declared as your own.
+    if repo.get("is_mirror"):
+        source = str(repo.get("mirror_source") or "").lower()
+        evidence.append("is_mirror=1 (pull-mirror; upstream is the source of truth)")
+        if not source:
+            evidence.append("mirror with no recorded source address")
+            return verdict("unclassified", "none")
+        if not rules.own_remotes:
+            evidence.append("no own_remotes patterns configured (WARRIOR_OWN_REMOTES); "
+                            "cannot tell your own mirror from a third-party one")
+            return verdict("mirror", "low")
+        if any(pattern.search(source) for pattern in rules.own_remotes):
+            evidence.append("mirror source matches a remote you declared as your own")
+            return verdict("first-party", "high")
+        evidence.append("mirror source is a third-party account")
+        return verdict("mirror", "high")
+
+    if repo.get("is_archived"):
+        evidence.append("forge archived flag is set")
+        return verdict("archive", "high")
+
+    # Explicit, justified judgements for repositories whose name carries no
+    # regional prefix. The reason travels with the verdict.
+    if name in rules.known_purpose:
+        known = rules.known_purpose[name]
+        evidence.append(f"known repository: {known['reason']}")
+        return verdict(known["purpose"], "high")
+
+    # A claimed identity status sharpens a name-based guess. It records what a
+    # project SAYS about itself, so it never overrides a stronger signal and is
+    # never sole grounds to call something dead.
+    claimed = (identities.get(name) or "").lower()
+    if claimed:
+        evidence.append(f"claimed identity status={claimed} (self-reported metadata)")
+
+    if region_rule:
+        evidence.append(f"name prefix '{region_rule['prefix']}' indicates region {region}")
+        override = rules.identity_overrides.get(claimed) if claimed else None
+        if override:
+            evidence.append(f"identity status '{claimed}' overrides the region purpose")
+            return verdict(override["purpose"], override["confidence"])
+        return verdict(region_rule["purpose"], region_rule["confidence"])
+
+    if claimed:
+        override = rules.identity_overrides.get(claimed)
+        if override:
+            return verdict(override["purpose"], "low")
+
+    evidence.append("no decisive signal")
+    return verdict("unclassified", "none")
+
+
+def topics_for(record: dict[str, Any]) -> list[str]:
+    """Topics to add.
+
+    Purpose (ownership/policy) and sync mechanism stay SEPARATE on purpose. A
+    repository can legitimately be first-party AND a pull-mirror; collapsing
+    those into one label is what mislabelled the flagship product as somebody
+    else's code.
+    """
+    topics = [f"purpose-{record['purpose']}"]
+    if record.get("region") and record["region"] != "unknown":
+        topics.append(f"region-{record['region']}")
+    if record.get("is_mirror"):
+        topics.append("sync-pull-mirror")
+    return [topic for topic in topics if TOPIC_RE.match(topic)]
+
+
+# ---------------------------------------------------------------------------
+# Evidence sources
+# ---------------------------------------------------------------------------
+
+def normalise_api_repo(raw: dict[str, Any]) -> dict[str, Any]:
+    owner = raw.get("owner") or {}
+    return {
+        "id": raw.get("id"),
+        "name": raw.get("name") or "",
+        "lower_name": str(raw.get("name") or "").lower(),
+        "is_mirror": bool(raw.get("mirror")),
+        "is_fork": bool(raw.get("fork")),
+        "is_archived": bool(raw.get("archived")),
+        "is_empty": bool(raw.get("empty")),
+        "is_private": bool(raw.get("private")),
+        "size": raw.get("size") or 0,
+        "owner": str(owner.get("login") or "").lower(),
+        # A migration/mirror URL can carry an access token. Redact on the way in,
+        # so it can never reach a manifest, a log, or a terminal.
+        "mirror_source": redact_url_userinfo(str(raw.get("original_url") or "")),
+    }
+
+
+def read_repositories_api(api_base: str, owner: str, token: str) -> list[dict[str, Any]]:
+    """Page through the forge API. Works against a remote forge."""
+    repositories: list[dict[str, Any]] = []
+    for endpoint in (f"/users/{owner}/repos", f"/orgs/{owner}/repos"):
+        page, seen_any = 1, False
+        while page <= 200:
+            status, body = api(api_base, f"{endpoint}?page={page}&limit=50", token)
+            if status == 404:
+                break
+            if status != 200 or not isinstance(body, list):
+                raise ConfigError(
+                    f"forge API returned HTTP {status} for {endpoint}: {body}")
+            if not body:
+                break
+            seen_any = True
+            repositories.extend(normalise_api_repo(raw) for raw in body)
+            if len(body) < 50:
+                break
+            page += 1
+        if seen_any:
+            return sorted(repositories, key=lambda repo: repo["lower_name"])
+    if repositories:
+        return sorted(repositories, key=lambda repo: repo["lower_name"])
+    raise ConfigError(
+        f"the forge API returned no repositories for owner '{owner}'.\n"
+        "  Check WARRIOR_GIT_OWNER, and that the token can see that namespace."
+    )
+
+
+def read_repositories_sqlite(db_path: Path) -> list[dict[str, Any]]:
+    """Read repository rows strictly read-only. Never mutates the forge database."""
+    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            "SELECT r.id, r.lower_name, r.name, r.is_mirror, r.is_fork,"
+            "       r.is_archived, r.is_empty, r.is_private, r.size,"
+            "       u.lower_name AS owner, m.remote_address AS mirror_source"
+            "  FROM repository r"
+            "  JOIN user u ON u.id = r.owner_id"
+            "  LEFT JOIN mirror m ON m.repo_id = r.id"
+            " ORDER BY r.lower_name"
+        ).fetchall()
+    except sqlite3.Error as error:
+        raise ConfigError(
+            f"cannot read {db_path} as a Gitea database: {error}\n"
+            "  Use --source api to classify a forge you cannot read on disk."
+        ) from None
+    finally:
+        connection.close()
+    records = []
+    for row in rows:
+        record = dict(row)
+        # remote_address routinely carries credentials for private upstreams.
+        record["mirror_source"] = redact_url_userinfo(str(record.get("mirror_source") or ""))
+        records.append(record)
+    return records
+
+
+def identity_index(settings: Settings, scan_root: Path | None,
+                   identity_map: Path | None) -> dict[str, str]:
+    """Map flattened repository name -> claimed status, from JSON and/or sqlite."""
+    index: dict[str, str] = {}
+
+    map_path = identity_map or settings.get("identity_map")
+    if map_path:
+        try:
+            raw = json.loads(Path(map_path).expanduser().read_text())
+        except (OSError, ValueError) as error:
+            raise ConfigError(f"cannot read identity map {map_path}: {error}") from None
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{map_path}: expected an object of name -> status")
+        for key, status in raw.items():
+            flattened = flatten_path(key, scan_root) if str(key).startswith("/") else str(key)
+            if flattened:
+                index[flattened.lower()] = str(status)
+
+    db_path = settings.get("identity_db")
+    if db_path and Path(db_path).expanduser().exists():
+        query = settings.get("identity_query") or DEFAULT_IDENTITY_QUERY
+        connection = sqlite3.connect(f"file:{Path(db_path).expanduser()}?mode=ro", uri=True)
+        try:
+            for path, status in connection.execute(query).fetchall():
+                key = flatten_path(path, scan_root) if str(path).startswith("/") else str(path)
+                if key:
+                    index.setdefault(key.lower(), str(status))
+        except sqlite3.Error as error:
+            raise ConfigError(
+                f"cannot read identity database {db_path}: {error}\n"
+                "  Set 'identity_query' in your config to match your schema."
+            ) from None
+        finally:
+            connection.close()
+    return index
+
+
+def build_manifest(repositories: list[dict[str, Any]], identities: dict[str, str],
+                   rules: Rules, source_label: str) -> dict[str, Any]:
+    records = []
+    for repo in repositories:
+        record = classify(repo, identities, rules)
+        record.update({
+            "owner": repo.get("owner") or "",
+            "name": repo.get("name") or "",
+            "lower_name": repo.get("lower_name") or "",
+            "is_mirror": bool(repo.get("is_mirror")),
+            "is_private": bool(repo.get("is_private")),
+            "is_empty": bool(repo.get("is_empty")),
+            "size_bytes": repo.get("size") or 0,
+            "mirror_source": repo.get("mirror_source") or "",
+        })
+        # Computed last: topics depend on the fields merged in above.
+        record["topics_proposed"] = topics_for(record)
+        records.append(record)
+
+    summary: dict[str, int] = {}
+    for record in records:
+        summary[record["purpose"]] = summary.get(record["purpose"], 0) + 1
+
+    return {
+        "read_only": True,
+        "moves_or_deletes": "never",
+        "schema_version": 1,
+        "evidence_source": source_label,
+        "identity_matches": len(identities),
+        "own_remotes_configured": bool(rules.own_remotes),
+        "purpose_vocabulary": PURPOSES,
+        "summary": summary,
+        "total": len(records),
+        "repositories": records,
+    }
+
+
+def add_topic(api_base: str, owner: str, repo: str, topic: str,
+              token: str) -> tuple[bool, str]:
+    """Add ONE topic through the API. Additive and reversible by design."""
+    status, body = api(api_base, f"/repos/{owner}/{repo}/topics/{topic}", token, "PUT")
+    if 200 <= status < 300:
+        return True, str(status)
+    return False, f"HTTP {status}" if status > 0 else f"unreachable: {body}"
+
+
+def human_report(manifest: dict[str, Any]) -> str:
+    lines = ["REPOSITORY PURPOSE CLASSIFICATION",
+             "  read-only; this command never moves, renames or deletes a repository",
+             f"  evidence: {manifest['evidence_source']}",
+             "",
+             f"  {manifest['total']} repositories", ""]
+    for purpose, count in sorted(manifest["summary"].items(), key=lambda item: -item[1]):
+        lines.append(f"  {count:>4}  {purpose:<14} {PURPOSES[purpose]}")
+    lines.append("")
+
+    if not manifest["own_remotes_configured"]:
+        lines += ["  NOTE: no own_remotes patterns are configured, so every pull-mirror",
+                  "        is reported as third-party. Set WARRIOR_OWN_REMOTES (or",
+                  "        'own_remotes' in your config) to the remotes you own -",
+                  "        is_mirror is a SYNC MECHANISM, not ownership.", ""]
+
+    unclassified = [r for r in manifest["repositories"] if r["purpose"] == "unclassified"]
+    if unclassified:
+        lines.append(f"  {len(unclassified)} repositories need a human decision:")
+        for record in unclassified[:20]:
+            lines.append(f"    - {record['owner']}/{record['name']}")
+        if len(unclassified) > 20:
+            lines.append(f"    ... and {len(unclassified) - 20} more (see --json)")
+        lines.append("")
+
+    low = [r for r in manifest["repositories"] if r["confidence"] == "low"]
+    if low:
+        lines.append(f"  {len(low)} classified with LOW confidence - review before "
+                     "relying on them.")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def gather(settings: Settings, arguments: argparse.Namespace) -> tuple[list[dict[str, Any]], str]:
+    """Return (repositories, label) from whichever evidence source is available."""
+    db_path = arguments.database or settings.get("gitea_db")
+    db_path = Path(db_path).expanduser() if db_path else None
+    source = arguments.source
+
+    if source in {"auto", "sqlite"} and db_path and db_path.exists():
+        return read_repositories_sqlite(db_path), f"sqlite {db_path}"
+    if source == "sqlite":
+        raise ConfigError(
+            f"--source sqlite needs a forge database. {'Not found: ' + str(db_path) if db_path else 'None configured.'}\n"
+            "  Set WARRIOR_GITEA_DB (or 'gitea_db' in your config), or use --source api."
+        )
+
+    api_base = settings.require("git_api", "list repositories from the forge")
+    owner = settings.require("git_owner", "know whose repositories to classify")
+    token = forge_token(settings)
+    return read_repositories_api(api_base, owner, token), f"api {api_base} owner={owner}"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="warrior-classify", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--source", choices=("auto", "sqlite", "api"), default="auto",
+                        help="where to read repository state from (default: auto)")
+    parser.add_argument("--database", type=Path, help="path to a local Gitea gitea.db")
+    parser.add_argument("--rules", type=Path, help="JSON file of classification rules")
+    parser.add_argument("--identity-map", type=Path,
+                        help="JSON file mapping repository name or path -> status")
+    parser.add_argument("--config", type=Path, help="path to a config JSON file")
+    parser.add_argument("--json", action="store_true", help="machine-readable manifest")
+    parser.add_argument("--output", type=Path, help="write the manifest to a .json file")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="allow --output to replace an existing file")
+    parser.add_argument("--apply", action="store_true",
+                        help="ADD topics via the API (additive and reversible; default is a dry run)")
+    parser.add_argument("--limit", type=int, help="with --apply, stop after N repositories")
+    parser.add_argument("--print-config", action="store_true",
+                        help="show resolved configuration and where each value came from")
+    arguments = parser.parse_args()
+
+    try:
+        settings = Settings.load(arguments.config)
+
+        if arguments.print_config:
+            print(f"config file: {settings.source} "
+                  f"({'present' if settings.source and settings.source.exists() else 'absent'})")
+            for name, value, source in settings.describe():
+                print(f"  {name:<18} {value:<52} [{source}]")
+            print("  token              (never displayed)"
+                  "                                 [keychain or $WARRIOR_GIT_TOKEN]")
+            return 0
+
+        # Validate the output path BEFORE doing any work: a mistyped --output
+        # once overwrote a repository's .git/HEAD and broke it.
+        destination = safe_output_path(arguments.output, overwrite=arguments.overwrite) \
+            if arguments.output else None
+
+        rules = Rules.load(settings, arguments.rules)
+        scan_root = settings.get("scan_root")
+        identities = identity_index(settings, Path(scan_root) if scan_root else None,
+                                    arguments.identity_map)
+        repositories, label = gather(settings, arguments)
+        manifest = build_manifest(repositories, identities, rules, label)
+
+        if arguments.apply:
+            api_base = settings.require("git_api", "add topics through the API")
+            owner_default = settings.require("git_owner", "address repositories in the API")
+            token = forge_token(settings)
+            targets = manifest["repositories"]
+            if arguments.limit:
+                targets = targets[: arguments.limit]
+            applied = failed = 0
+            for record in targets:
+                owner = record["owner"] or owner_default
+                for topic in record["topics_proposed"]:
+                    ok, detail = add_topic(api_base, owner, record["name"], topic, token)
+                    if ok:
+                        applied += 1
+                    else:
+                        failed += 1
+                        print(f"  FAILED {owner}/{record['name']} topic={topic} ({detail})")
+            manifest["applied_topics"] = applied
+            manifest["failed_topics"] = failed
+            print(f"Applied {applied} topics ({failed} failed). "
+                  "No repository was moved, renamed or deleted.")
+
+        if destination:
+            destination.write_text(json.dumps(manifest, indent=2) + "\n")
+            print(f"Manifest written to {destination}")
+
+        if arguments.json:
+            print(json.dumps(manifest, indent=2))
+        elif not arguments.apply:
+            print(human_report(manifest))
+            proposed = sum(len(r["topics_proposed"]) for r in manifest["repositories"])
+            print(f"  DRY RUN - {proposed} topics would be added across "
+                  f"{manifest['total']} repositories. Re-run with --apply.")
+    except ConfigError as error:
+        print(f"warrior-classify: {error}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

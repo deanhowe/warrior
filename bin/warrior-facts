@@ -1,0 +1,1352 @@
+#!/usr/bin/env python3
+"""warrior-facts: answer questions about this developer's machine, read-only.
+
+This is the tool an agent calls to orient itself on an unfamiliar machine.
+It answers six questions and nothing else:
+
+    where <name>     where is the project/repo called <name>?
+    repos            what repositories exist under these roots?
+    repo [path]      what is this repository? (branch, HEAD, remotes, dirt)
+    toolchains       what languages, runtimes and package managers are here?
+    services         what is listening on this machine right now?
+    unprotected      which repositories have nowhere else to live?
+    orient           a small bundle of all of the above, for a cold start
+
+Two output modes: human text by default, `--json` for machines. The JSON
+shape is a stable contract, printed by `warrior-facts schema`, and is kept
+deliberately small so a whole answer fits in a context window.
+
+SAFETY CONTRACT -- this file only ever reads.
+
+  * Every Git call passes through one guarded choke point (`git()`) that
+    refuses any subcommand outside a read-only allowlist. It cannot push,
+    reset, clean, prune, gc, checkout, stash, commit, or rewrite anything.
+  * The bare `git stash` form is NOT a listing command -- it takes work out
+    of the working tree and reports only "ok stashed". `git branch` and
+    `git worktree` list when bare; `git stash` does not. GUARD_REQUIRE_VERB
+    exists for exactly that trap. Do not relax it.
+  * Every Git call passes `--no-optional-locks -c core.fsmonitor=`. Without
+    the first, `git status` refreshes and WRITES BACK `.git/index` and runs
+    the repository's post-index-change hook. Without the second, `git status`
+    executes the repository-configured fsmonitor program. Either one would
+    make this tool neither read-only nor safe against a repository that
+    supplies its own programs.
+  * No file contents are ever read. Project detection is existence checks on
+    directory entries only. Directories that hold credentials (`.ssh`,
+    `.gnupg`, `.aws`, `.kube`, ...) are pruned from traversal entirely and
+    never opened.
+  * Symlinked directories are recorded but never followed, so a walk can
+    never leave the root it was given.
+  * Remote URLs are printed with any embedded userinfo replaced by
+    [REDACTED], so inspection can never emit a credential.
+  * Version probes execute a tool only when it resolves outside the working
+    tree. A repository that ships `node_modules/.bin/<anything>` on PATH does
+    not get run by this tool; its path is reported and it is skipped.
+
+The one thing this tool knows that `git status` does not: a remote protects
+COMMITTED OBJECTS ONLY. Shelves, index state, stashes, untracked files and
+dangling objects have zero protection from any mirror anywhere. Where that
+matters, the answer says so.
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+import datetime as dt
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Iterator
+
+SCHEMA_VERSION = 1
+TOOL_NAME = "warrior-facts"
+
+# Exit codes, part of the contract.
+EXIT_OK = 0
+EXIT_NOT_FOUND = 1  # the question was valid, the answer is "nothing"
+EXIT_USAGE = 2
+
+# ---------------------------------------------------------------------------
+# Traversal policy
+# ---------------------------------------------------------------------------
+
+# Dependency, build and cache output. Real work is not stored here, and
+# walking it is where a machine scan goes from seconds to minutes.
+PRUNE_NAMES = {
+    ".build", ".bundle", ".cache", ".cargo", ".git", ".gradle", ".mypy_cache",
+    ".next", ".npm", ".nuxt", ".parcel-cache", ".pnpm-store", ".pytest_cache",
+    ".ruff_cache", ".swiftpm", ".terraform", ".tox", ".venv", ".yarn",
+    "DerivedData", "Pods", "__pycache__", "bower_components", "build",
+    "coverage", "dist", "node_modules", "target", "vendor", "venv",
+}
+
+# Never traversed, never opened, never listed. These hold credentials.
+SENSITIVE_NAMES = {
+    ".aws", ".azure", ".chef", ".docker", ".gnupg", ".kube", ".netrc",
+    ".password-store", ".pki", ".ssh", ".subversion", "Keychains",
+    "credentials", "gcloud", "secrets",
+}
+
+# Existence of any of these says "a human works here".
+PROJECT_MARKERS = (
+    "AGENTS.md", "CLAUDE.md", "Cargo.toml", "Dockerfile", "Gemfile",
+    "Makefile", "Package.swift", "README.md", "build.gradle", "composer.json",
+    "docker-compose.yaml", "docker-compose.yml", "go.mod", "package.json",
+    "pyproject.toml", "requirements.txt",
+)
+
+# Where developers keep work. Home itself is never a default root: it is too
+# large to walk and too full of things that are not projects.
+DEFAULT_ROOT_NAMES = (
+    "PROJECTS", "Projects", "projects", "Developer", "Sites", "src", "code",
+    "Code", "dev", "repos", "workspace", "work", "git",
+)
+
+# ---------------------------------------------------------------------------
+# The Git choke point
+# ---------------------------------------------------------------------------
+
+READ_ONLY_GIT = {
+    "branch", "config", "count-objects", "for-each-ref", "log", "remote",
+    "rev-parse", "stash", "status", "worktree",
+}
+
+# Subcommands whose bare form is safe but whose verbs are not (`remote add`,
+# `remote remove`, `remote prune`, `config --unset`...). Require an explicit
+# read-only option and refuse every verb.
+GUARD_NO_VERB = {
+    "remote": {"-v", "--verbose"},
+    "status": {"--porcelain", "--porcelain=v1", "--porcelain=v2", "-z",
+               "--no-renames", "--branch", "--untracked-files=all",
+               "--untracked-files=normal", "--ignored=no"},
+    "count-objects": {"-v", "--verbose"},
+}
+
+# Subcommands whose bare form performs an action or is ambiguous. The first
+# verb must be one of these, and there must be exactly one.
+GUARD_REQUIRE_VERB = {
+    "stash": {"list"},
+    "worktree": {"list"},
+}
+
+# Subcommands that must carry at least one of these read-only options.
+GUARD_REQUIRE_OPTION = {
+    "branch": {"--show-current", "--list", "--format", "-a", "--all", "-v"},
+    "config": {"--get", "--get-all", "--get-regexp", "--list"},
+}
+
+# Refused wherever they appear, in any position, in any subcommand.
+DENY_TOKENS = {
+    "--all-but", "--delete", "--force", "--hard", "--merge", "--mixed",
+    "--prune", "--set-upstream", "--set-upstream-to", "--soft", "--unset",
+    "--unset-all", "--write", "-D", "-d", "-f", "-u",
+}
+
+GIT_TIMEOUT = 30
+
+URL_USERINFO = re.compile(r"([a-z][a-z0-9+.-]*://)[^/@\s]+@", re.IGNORECASE)
+
+
+def redact_remote(line: str) -> str:
+    """Remove URL userinfo so inspection cannot print embedded credentials."""
+    return URL_USERINFO.sub(r"\1[REDACTED]@", line)
+
+
+def assert_read_only(args: tuple[str, ...]) -> None:
+    """Refuse anything that is not a proven read-only Git form."""
+    if not args:
+        raise RuntimeError("refusing to invoke git with no subcommand")
+    subcommand = args[0]
+    if subcommand not in READ_ONLY_GIT:
+        raise RuntimeError(f"refusing non-read-only git subcommand: {subcommand}")
+    rest = args[1:]
+    verbs = [token for token in rest if not token.startswith("-")]
+    options = [token for token in rest if token.startswith("-")]
+
+    for token in rest:
+        if token in DENY_TOKENS:
+            raise RuntimeError(f"refusing git {subcommand} with denied token: {token}")
+
+    if subcommand in GUARD_NO_VERB:
+        if verbs:
+            raise RuntimeError(f"refusing git {subcommand} with verb: {verbs[0]}")
+        if not options:
+            raise RuntimeError(f"refusing bare git subcommand: {subcommand}")
+        unknown = [token for token in options if token not in GUARD_NO_VERB[subcommand]]
+        if unknown:
+            raise RuntimeError(f"refusing git {subcommand} with options: {unknown}")
+
+    if subcommand in GUARD_REQUIRE_VERB:
+        allowed = GUARD_REQUIRE_VERB[subcommand]
+        if not verbs:
+            raise RuntimeError(f"refusing bare git subcommand: {subcommand}")
+        if verbs[0] not in allowed:
+            raise RuntimeError(f"refusing ambiguous git form: {subcommand} {verbs[0]}")
+        if len(verbs) > 1:
+            raise RuntimeError(f"refusing git {subcommand} with extra verb: {verbs[1]}")
+
+    if subcommand in GUARD_REQUIRE_OPTION:
+        if not set(options) & GUARD_REQUIRE_OPTION[subcommand]:
+            raise RuntimeError(f"refusing git {subcommand} without a read-only option")
+
+
+def git(repo: Path, *args: str, timeout: int = GIT_TIMEOUT) -> tuple[int, str, str]:
+    """The one and only Git subprocess. Guarded, read-only, never prompts."""
+    assert_read_only(args)
+    env = dict(os.environ)
+    # Never let Git prompt for anything, and never let it reach a network.
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = ""
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        process = subprocess.run(
+            # --no-optional-locks: without it `git status` refreshes and writes
+            # back .git/index, and runs the repo's post-index-change hook.
+            # -c core.fsmonitor=: without it `git status` executes the
+            # repository-configured fsmonitor program.
+            ["git", "--no-optional-locks", "-c", "core.fsmonitor=",
+             "-C", str(repo), *args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return -1, "", f"{type(error).__name__}: {str(error)[:200]}"
+    return process.returncode, process.stdout, process.stderr.strip()[:200]
+
+
+def out(result: tuple[int, str, str]) -> str:
+    return result[1].strip()
+
+
+# ---------------------------------------------------------------------------
+# Bounded, symlink-safe traversal
+# ---------------------------------------------------------------------------
+
+
+def walk_dirs(
+    root: Path,
+    max_depth: int,
+    stats: Counter,
+    prune: set[str] | None = None,
+) -> Iterator[tuple[Path, int, set[str], set[str], list[str]]]:
+    """Yield (path, depth, child_dir_names, file_names, live_dirs) under root.
+
+    Never follows symlinks, so a walk cannot leave the root it was given.
+    Child directory names are yielded BEFORE pruning, so callers can still
+    see `.git` without the walk descending into it. `live_dirs` is os.walk's
+    own mutable list: a caller that clears it stops descent from that
+    directory, which is how a bare repository's object store is skipped.
+    """
+    prune = PRUNE_NAMES if prune is None else prune
+
+    def onerror(_error: OSError) -> None:
+        stats["unreadable"] += 1
+
+    for current, dirs, files in os.walk(root, topdown=True, followlinks=False, onerror=onerror):
+        path = Path(current)
+        try:
+            depth = len(path.relative_to(root).parts)
+        except ValueError:  # pragma: no cover - os.walk stays inside root
+            dirs[:] = []
+            continue
+        raw_dirs = set(dirs)
+        yield path, depth, raw_dirs, set(files), dirs
+        kept = []
+        for name in sorted(dirs, key=str.casefold):
+            child = path / name
+            if name in SENSITIVE_NAMES:
+                stats["sensitive"] += 1
+            elif name in prune:
+                stats["noisy"] += 1
+            elif depth + 1 > max_depth:
+                stats["depth_limit"] += 1
+            elif child.is_symlink():
+                stats["symlink"] += 1
+            else:
+                kept.append(name)
+        dirs[:] = kept
+
+
+def repo_kind(path: Path, dir_names: set[str], file_names: set[str]) -> str | None:
+    """Classify a directory as a Git boundary, or None."""
+    if ".git" in dir_names:
+        return "git_worktree"
+    if ".git" in file_names:
+        return "git_linked_worktree"
+    if "HEAD" in file_names and "objects" in dir_names and "refs" in dir_names:
+        return "bare_git"
+    return None
+
+
+def markers_for(file_names: set[str], dir_names: set[str]) -> list[str]:
+    present = file_names | dir_names
+    return [marker for marker in PROJECT_MARKERS if marker in present]
+
+
+# ---------------------------------------------------------------------------
+# Roots
+# ---------------------------------------------------------------------------
+
+
+def default_roots() -> list[Path]:
+    """Where this developer probably keeps work, discovered not assumed."""
+    from_env = os.environ.get("WARRIOR_ROOTS", "").strip()
+    if from_env:
+        candidates = [Path(item).expanduser() for item in from_env.split(os.pathsep) if item]
+    else:
+        home = Path.home()
+        candidates = [home / name for name in DEFAULT_ROOT_NAMES]
+        go_src = home / "go" / "src"
+        if go_src.is_dir():
+            candidates.append(go_src)
+    roots = [path for path in candidates if path.is_dir()]
+    cwd = Path.cwd()
+    if not any(is_within(cwd, root) for root in roots):
+        roots.append(cwd)
+    return dedupe_roots(roots)
+
+
+def is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def dedupe_roots(roots: list[Path]) -> list[Path]:
+    """Resolve, drop duplicates, drop any root contained in another root."""
+    resolved: list[Path] = []
+    for root in roots:
+        try:
+            candidate = root.expanduser().resolve()
+        except OSError:
+            continue
+        if not candidate.is_dir():
+            continue
+        if candidate not in resolved:
+            resolved.append(candidate)
+    kept = []
+    for candidate in resolved:
+        if any(candidate != other and is_within(candidate, other) for other in resolved):
+            continue
+        kept.append(candidate)
+    return sorted(kept, key=lambda item: str(item).casefold())
+
+
+def resolve_roots(supplied: list[str] | None) -> tuple[list[Path], list[str]]:
+    warnings: list[str] = []
+    if not supplied:
+        roots = default_roots()
+        if not roots:
+            warnings.append("No project roots found. Pass --root explicitly.")
+        return roots, warnings
+    roots = []
+    for item in supplied:
+        path = Path(item).expanduser()
+        if not path.is_dir():
+            warnings.append(f"Not a directory, skipped: {path}")
+            continue
+        roots.append(path)
+    return dedupe_roots(roots), warnings
+
+
+# ---------------------------------------------------------------------------
+# where: find a project or repository by name
+# ---------------------------------------------------------------------------
+
+
+def normalize(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.casefold())
+
+
+def match_score(query: str, name: str, relative: str) -> tuple[int, str] | None:
+    """Rank a directory against a query. Higher is better, None is no match."""
+    if "/" in query:
+        wanted = query.strip("/").casefold()
+        have = relative.casefold()
+        if have == wanted:
+            return 100, "path_exact"
+        if have.endswith("/" + wanted):
+            return 90, "path_suffix"
+        if wanted in have:
+            return 55, "path_substring"
+        return None
+    lowered = query.casefold()
+    if name == query:
+        return 100, "exact"
+    if name.casefold() == lowered:
+        return 95, "exact_icase"
+    if normalize(name) == normalize(query):
+        return 85, "exact_normalized"
+    if name.casefold().startswith(lowered):
+        return 70, "prefix"
+    if lowered in name.casefold():
+        return 50, "substring"
+    if normalize(query) and normalize(query) in normalize(name):
+        return 40, "substring_normalized"
+    return None
+
+
+def find_where(
+    query: str, roots: list[Path], max_depth: int, limit: int,
+) -> tuple[dict[str, Any], bool]:
+    stats: Counter = Counter()
+    hits: list[dict[str, Any]] = []
+    for root in roots:
+        for path, depth, dir_names, file_names, live_dirs in walk_dirs(root, max_depth, stats):
+            if path == root:
+                continue
+            if repo_kind(path, dir_names, file_names) == "bare_git":
+                live_dirs.clear()
+            relative = path.relative_to(root).as_posix()
+            scored = match_score(query, path.name, relative)
+            if scored is None:
+                continue
+            score, how = scored
+            kind = repo_kind(path, dir_names, file_names)
+            hits.append({
+                "path": str(path),
+                "name": path.name,
+                "root": str(root),
+                "relative": relative,
+                "depth": depth,
+                "match": how,
+                "score": score,
+                "is_repo": kind is not None,
+                "repo_kind": kind,
+                "markers": markers_for(file_names, dir_names),
+            })
+    hits.sort(key=lambda item: (-item["score"], item["depth"], item["path"].casefold()))
+    total = len(hits)
+    truncated = bool(limit) and total > limit
+    if truncated:
+        hits = hits[:limit]
+    return {
+        "query": query,
+        "roots": [str(root) for root in roots],
+        "max_depth": max_depth,
+        "count": total,
+        "matches": hits,
+        "excluded_from_traversal": dict(sorted(stats.items())),
+    }, truncated
+
+
+# ---------------------------------------------------------------------------
+# repos / unprotected: what repositories exist, and which have no home
+# ---------------------------------------------------------------------------
+
+
+def discover_repositories(roots: list[Path], max_depth: int) -> tuple[list[dict[str, Any]], Counter]:
+    stats: Counter = Counter()
+    found: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for root in roots:
+        for path, depth, dir_names, file_names, live_dirs in walk_dirs(root, max_depth, stats):
+            kind = repo_kind(path, dir_names, file_names)
+            if kind is None:
+                continue
+            if kind == "bare_git":
+                # Never walk an object store: 256 fan-out directories of
+                # nothing a human ever edits.
+                live_dirs.clear()
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append({
+                "path": key,
+                "name": path.name,
+                "root": str(root),
+                "relative": path.relative_to(root).as_posix() or ".",
+                "depth": depth,
+                "kind": kind,
+            })
+    found.sort(key=lambda item: item["path"].casefold())
+    return found, stats
+
+
+def remote_transport(url: str) -> str:
+    value = url.strip()
+    if value.startswith(("ssh://", "git+ssh://")):
+        return "ssh"
+    if value.startswith(("https://", "http://")):
+        return "https"
+    if value.startswith("git://"):
+        return "git"
+    if value.startswith(("file://", "/", "./", "../", "~")):
+        return "file"
+    if re.match(r"^[^/@\s]+@[^:/\s]+:", value):
+        return "ssh"
+    return "unknown"
+
+
+def read_remotes(repo: Path) -> list[dict[str, str]]:
+    """Remote name, redacted URL and transport. Never prints a credential."""
+    code, stdout, _ = git(repo, "remote", "-v")
+    if code != 0:
+        return []
+    seen: dict[tuple[str, str], dict[str, str]] = {}
+    for line in stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name, url = parts[0], parts[1]
+        key = (name, url)
+        if key in seen:
+            continue
+        seen[key] = {
+            "name": name,
+            "url": redact_remote(url),
+            "transport": remote_transport(url),
+        }
+    return list(seen.values())
+
+
+def protection_for(remotes: list[dict[str, str]]) -> tuple[bool, str]:
+    """Is this repository's history stored anywhere but this disk?
+
+    A filesystem-path remote is not protection: it is the same disk, and a
+    filesystem push into an already-up-to-date repository exits 0 having sent
+    nothing, so it looks like it worked when it did not.
+    """
+    if not remotes:
+        return False, "no_remote"
+    transports = {remote["transport"] for remote in remotes}
+    if transports <= {"file", "unknown"}:
+        return False, "local_path_remote_only"
+    return True, "has_network_remote"
+
+
+def annotate_protection(records: list[dict[str, Any]], workers: int) -> None:
+    def annotate(record: dict[str, Any]) -> None:
+        remotes = read_remotes(Path(record["path"]))
+        protected, reason = protection_for(remotes)
+        record["remote_names"] = [remote["name"] for remote in remotes]
+        record["transports"] = sorted({remote["transport"] for remote in remotes})
+        record["protected"] = protected
+        record["protection"] = reason
+
+    if not records:
+        return
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        list(pool.map(annotate, records))
+
+
+def survey_repositories(
+    roots: list[Path], max_depth: int, limit: int, workers: int, with_git: bool,
+    only_unprotected: bool = False,
+) -> tuple[dict[str, Any], bool]:
+    records, stats = discover_repositories(roots, max_depth)
+    scanned = len(records)
+    if with_git:
+        annotate_protection(records, workers)
+    if only_unprotected:
+        records = [item for item in records if item.get("protected") is False]
+    total = len(records)
+    unprotected = sum(1 for item in records if item.get("protected") is False)
+    truncated = bool(limit) and total > limit
+    shown = records[:limit] if truncated else records
+    result = {
+        "roots": [str(root) for root in roots],
+        "max_depth": max_depth,
+        "scanned": scanned,
+        "count": total,
+        "unprotected_count": unprotected if with_git else None,
+        "kinds": dict(sorted(Counter(item["kind"] for item in records).items())),
+        "repositories": shown,
+        "excluded_from_traversal": dict(sorted(stats.items())),
+    }
+    return result, truncated
+
+
+# ---------------------------------------------------------------------------
+# repo: what is this repository
+# ---------------------------------------------------------------------------
+
+
+def enclosing_repo(start: Path) -> Path | None:
+    """Walk up for a Git boundary without asking Git to resolve it for us."""
+    current = start.expanduser().resolve()
+    for candidate in [current, *current.parents]:
+        marker = candidate / ".git"
+        if marker.is_dir() or marker.is_file():
+            return candidate
+        if (candidate / "HEAD").is_file() and (candidate / "objects").is_dir():
+            return candidate
+    return None
+
+
+def parse_status_counts(payload: str) -> dict[str, int]:
+    """Count `status --porcelain=v1 -z --no-renames` entries.
+
+    --no-renames is deliberate: without it a rename entry carries a second
+    NUL-separated path, and a naive split counts that source path as another
+    change. Asking Git not to detect renames removes the trap entirely.
+    """
+    counts = {"staged": 0, "modified": 0, "untracked": 0}
+    for entry in payload.split("\0"):
+        if len(entry) < 3:
+            continue
+        index_state, worktree_state = entry[0], entry[1]
+        if index_state == "?" and worktree_state == "?":
+            counts["untracked"] += 1
+            continue
+        if index_state not in {" ", "?", "!"}:
+            counts["staged"] += 1
+        if worktree_state not in {" ", "?", "!"}:
+            counts["modified"] += 1
+    return counts
+
+
+def nested_repositories(top: Path, max_depth: int = 4) -> list[str]:
+    stats: Counter = Counter()
+    nested = []
+    for path, _depth, dir_names, file_names, live_dirs in walk_dirs(top, max_depth, stats):
+        if path == top:
+            continue
+        kind = repo_kind(path, dir_names, file_names)
+        if kind is not None:
+            nested.append(str(path))
+            if kind == "bare_git":
+                live_dirs.clear()
+    return sorted(nested)
+
+
+def worktrees_for(repo: Path) -> list[str]:
+    code, stdout, _ = git(repo, "worktree", "list", "--porcelain")
+    if code != 0:
+        return []
+    return [line.split(" ", 1)[1] for line in stdout.splitlines() if line.startswith("worktree ")]
+
+
+def inspect_repository(target: Path, nested_depth: int = 4) -> dict[str, Any] | None:
+    repo = enclosing_repo(target)
+    if repo is None:
+        return None
+    head = out(git(repo, "rev-parse", "--short=12", "HEAD"))
+    branch = out(git(repo, "branch", "--show-current"))
+    upstream_code, upstream_raw, _ = git(repo, "rev-parse", "--abbrev-ref", "@{upstream}")
+    upstream = upstream_raw.strip() if upstream_code == 0 else None
+    _, status_raw, _ = git(repo, "status", "--porcelain=v1", "-z", "--no-renames")
+    counts = parse_status_counts(status_raw)
+    stash_code, stash_raw, _ = git(repo, "stash", "list")
+    stash_entries = len([line for line in stash_raw.splitlines() if line.strip()]) if stash_code == 0 else 0
+    remotes = read_remotes(repo)
+    protected, reason = protection_for(remotes)
+    last_commit = out(git(repo, "log", "-1", "--format=%cI|%an|%s"))
+    commit: dict[str, str] | None = None
+    if "|" in last_commit:
+        when, author, subject = last_commit.split("|", 2)
+        commit = {"date": when, "author": author, "subject": subject[:120]}
+    is_bare = out(git(repo, "rev-parse", "--is-bare-repository")) == "true"
+    nested = nested_repositories(repo, nested_depth) if not is_bare else []
+    worktrees = worktrees_for(repo)
+
+    unprotected_work = counts["untracked"] + counts["modified"] + counts["staged"] + stash_entries
+    advice: list[str] = []
+    if not protected and reason == "no_remote":
+        advice.append("This repository has no remote. Its entire history exists on this disk only.")
+    if not protected and reason == "local_path_remote_only":
+        advice.append(
+            "Every remote is a filesystem path. That is the same disk, and a filesystem "
+            "push into an up-to-date repository exits 0 having sent nothing."
+        )
+    if protected and unprotected_work:
+        advice.append(
+            f"A remote protects committed objects only. {unprotected_work} uncommitted, "
+            "untracked or stashed items here have no protection anywhere."
+        )
+    if stash_entries:
+        advice.append(
+            f"{stash_entries} stash entr{'y' if stash_entries == 1 else 'ies'} exist. "
+            "Stashes are invisible to `git status` and are never mirrored."
+        )
+    if not branch:
+        advice.append("HEAD is detached. Commits made here are unreachable from any branch.")
+    if len(worktrees) > 1:
+        advice.append(f"{len(worktrees)} worktrees share this repository's object store.")
+    if nested:
+        advice.append(
+            f"{len(nested)} nested repositor{'y' if len(nested) == 1 else 'ies'} exist below this one. "
+            "The outer repository's status says nothing about them."
+        )
+
+    return {
+        "path": str(repo),
+        "name": repo.name,
+        "bare": is_bare,
+        "branch": branch or None,
+        "detached": not branch,
+        "head": head or None,
+        "upstream": upstream,
+        "last_commit": commit,
+        "counts": counts,
+        "stash_entries": stash_entries,
+        "clean": unprotected_work == 0,
+        "remotes": remotes,
+        "protected": protected,
+        "protection": reason,
+        "worktrees": worktrees,
+        "nested_repositories": nested,
+        "advice": advice,
+    }
+
+
+# ---------------------------------------------------------------------------
+# toolchains: what can this machine build
+# ---------------------------------------------------------------------------
+
+TOOLS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("python3", "language", ("--version",)),
+    ("node", "language", ("--version",)),
+    ("deno", "language", ("--version",)),
+    ("bun", "language", ("--version",)),
+    ("php", "language", ("--version",)),
+    ("ruby", "language", ("--version",)),
+    ("go", "language", ("version",)),
+    ("rustc", "language", ("--version",)),
+    ("java", "language", ("-version",)),
+    ("swift", "language", ("--version",)),
+    ("dotnet", "language", ("--version",)),
+    ("elixir", "language", ("--version",)),
+    ("perl", "language", ("--version",)),
+    ("lua", "language", ("-v",)),
+    ("zig", "language", ("version",)),
+    ("clang", "language", ("--version",)),
+    ("pip3", "package_manager", ("--version",)),
+    ("uv", "package_manager", ("--version",)),
+    ("poetry", "package_manager", ("--version",)),
+    ("pipx", "package_manager", ("--version",)),
+    ("npm", "package_manager", ("--version",)),
+    ("pnpm", "package_manager", ("--version",)),
+    ("yarn", "package_manager", ("--version",)),
+    ("composer", "package_manager", ("--version",)),
+    ("gem", "package_manager", ("--version",)),
+    ("bundle", "package_manager", ("--version",)),
+    ("cargo", "package_manager", ("--version",)),
+    ("brew", "package_manager", ("--version",)),
+    ("nix", "package_manager", ("--version",)),
+    ("mvn", "build", ("--version",)),
+    ("gradle", "build", ("--version",)),
+    ("make", "build", ("--version",)),
+    ("cmake", "build", ("--version",)),
+    ("just", "build", ("--version",)),
+    ("docker", "container", ("--version",)),
+    ("podman", "container", ("--version",)),
+    ("kubectl", "container", ("version", "--client")),
+    ("terraform", "infra", ("--version",)),
+    ("git", "vcs", ("--version",)),
+    ("gh", "vcs", ("--version",)),
+    ("hg", "vcs", ("--version",)),
+    ("svn", "vcs", ("--version",)),
+)
+
+VERSION_TIMEOUT = 6
+
+
+def trusted_executable(resolved: Path) -> bool:
+    """Refuse to execute a tool that resolves inside the working tree.
+
+    A repository that ships `node_modules/.bin/<name>` and asks you to put it
+    on PATH gets its path reported by this tool and nothing else.
+    """
+    cwd = Path.cwd().resolve()
+    try:
+        resolved.resolve().relative_to(cwd)
+        return False
+    except (ValueError, OSError):
+        return True
+
+
+def probe_tool(entry: tuple[str, str, tuple[str, ...]], with_versions: bool) -> dict[str, Any] | None:
+    name, category, version_args = entry
+    location = shutil.which(name)
+    if not location:
+        return None
+    resolved = Path(location)
+    record: dict[str, Any] = {
+        "name": name,
+        "category": category,
+        "path": str(resolved),
+        "version": None,
+    }
+    if not with_versions:
+        record["version_note"] = "not probed (--no-versions)"
+        return record
+    if not trusted_executable(resolved):
+        record["version_note"] = "not executed: resolves inside the working tree"
+        return record
+    try:
+        process = subprocess.run(
+            [str(resolved), *version_args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=VERSION_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        record["version_note"] = f"probe failed: {type(error).__name__}"
+        return record
+    text = (process.stdout or "") + "\n" + (process.stderr or "")
+    for line in text.splitlines():
+        if line.strip():
+            record["version"] = line.strip()[:120]
+            break
+    return record
+
+
+def survey_toolchains(with_versions: bool = True, workers: int = 8) -> dict[str, Any]:
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        results = list(pool.map(lambda entry: probe_tool(entry, with_versions), TOOLS))
+    found = [record for record in results if record]
+    found.sort(key=lambda item: (item["category"], item["name"]))
+    by_category: dict[str, list[str]] = {}
+    for record in found:
+        by_category.setdefault(record["category"], []).append(record["name"])
+    return {
+        "count": len(found),
+        "by_category": {key: by_category[key] for key in sorted(by_category)},
+        "tools": found,
+        "missing": sorted({name for name, _, _ in TOOLS} - {item["name"] for item in found}),
+    }
+
+
+# ---------------------------------------------------------------------------
+# services: what is listening right now
+# ---------------------------------------------------------------------------
+
+PORT_HINTS = {
+    80: "http", 443: "https", 1025: "smtp (mailpit/mailhog)", 2222: "ssh (alt)",
+    3000: "node/rails dev server", 3001: "node dev server", 3306: "mysql",
+    4200: "angular dev server", 5000: "flask/airplay", 5173: "vite dev server",
+    5432: "postgresql", 5354: "dns (alt port)", 6379: "redis",
+    7000: "airplay", 8000: "http dev server", 8025: "mailpit web ui",
+    8080: "http alt", 8443: "https alt", 8501: "streamlit", 9000: "php-fpm",
+    9200: "elasticsearch", 11211: "memcached", 27017: "mongodb",
+    5601: "kibana", 15672: "rabbitmq ui",
+}
+
+LOOPBACK = {"127.0.0.1", "::1", "[::1]", "localhost"}
+WILDCARD = {"*", "0.0.0.0", "::", "[::]"}
+
+
+def parse_lsof(payload: str) -> list[dict[str, Any]]:
+    rows = []
+    for line in payload.splitlines()[1:]:
+        tokens = line.split()
+        if len(tokens) < 9:
+            continue
+        name = tokens[-2] if tokens[-1] == "(LISTEN)" else tokens[-1]
+        if ":" not in name:
+            continue
+        address, _, port = name.rpartition(":")
+        if not port.isdigit():
+            continue
+        rows.append({
+            "process": tokens[0],
+            "pid": tokens[1],
+            "family": tokens[4] if len(tokens) > 4 else "",
+            "address": address or "*",
+            "port": int(port),
+        })
+    return rows
+
+
+def parse_ss(payload: str) -> list[dict[str, Any]]:
+    rows = []
+    for line in payload.splitlines():
+        tokens = line.split()
+        if len(tokens) < 4:
+            continue
+        local = tokens[3]
+        if ":" not in local:
+            continue
+        address, _, port = local.rpartition(":")
+        if not port.isdigit():
+            continue
+        process = ""
+        pid = ""
+        match = re.search(r'users:\(\("([^"]+)",pid=(\d+)', line)
+        if match:
+            process, pid = match.group(1), match.group(2)
+        rows.append({
+            "process": process or "unknown",
+            "pid": pid,
+            "family": "IPv6" if address.startswith("[") else "IPv4",
+            "address": address or "*",
+            "port": int(port),
+        })
+    return rows
+
+
+def listening_rows() -> tuple[list[dict[str, Any]], str, list[str]]:
+    """List listening TCP sockets. Listing only -- nothing is ever connected to."""
+    warnings: list[str] = []
+    attempts: list[tuple[str, list[str], Any]] = [
+        ("lsof", ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], parse_lsof),
+        ("ss", ["ss", "-H", "-ltnp"], parse_ss),
+        ("netstat", ["netstat", "-ltnp"], parse_ss),
+    ]
+    for label, command, parser in attempts:
+        if not shutil.which(command[0]):
+            continue
+        try:
+            process = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=20,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            warnings.append(f"{label} probe failed: {type(error).__name__}")
+            continue
+        rows = parser(process.stdout)
+        if rows or process.returncode == 0:
+            if label in {"lsof", "netstat"}:
+                warnings.append(
+                    f"Listing shows processes visible to {os.environ.get('USER', 'this user')} only; "
+                    "sockets owned by other users are not shown."
+                )
+            return rows, label, warnings
+    warnings.append("No socket listing tool found (lsof, ss, netstat).")
+    return [], "none", warnings
+
+
+def survey_services() -> tuple[dict[str, Any], list[str]]:
+    rows, source, warnings = listening_rows()
+    grouped: dict[tuple[int, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (row["port"], row["process"])
+        record = grouped.setdefault(key, {
+            "port": row["port"],
+            "process": row["process"],
+            "pids": set(),
+            "addresses": set(),
+        })
+        if row["pid"]:
+            record["pids"].add(row["pid"])
+        record["addresses"].add(row["address"])
+    services = []
+    for record in grouped.values():
+        addresses = record["addresses"]
+        if addresses & WILDCARD:
+            scope = "all_interfaces"
+        elif addresses <= LOOPBACK:
+            scope = "loopback"
+        else:
+            scope = "specific_interface"
+        services.append({
+            "port": record["port"],
+            "process": record["process"],
+            "pids": sorted(record["pids"]),
+            "addresses": sorted(addresses),
+            "scope": scope,
+            "hint": PORT_HINTS.get(record["port"]),
+        })
+    services.sort(key=lambda item: (item["port"], item["process"]))
+    return {
+        "source": source,
+        "protocol": "tcp",
+        "count": len(services),
+        "exposed_beyond_loopback": sum(1 for item in services if item["scope"] != "loopback"),
+        "services": services,
+    }, warnings
+
+
+# ---------------------------------------------------------------------------
+# orient: the cold-start bundle
+# ---------------------------------------------------------------------------
+
+
+def orient(roots: list[Path], max_depth: int, workers: int, limit: int) -> tuple[dict[str, Any], list[str]]:
+    warnings: list[str] = []
+    repos, stats = discover_repositories(roots, max_depth)
+    annotate_protection(repos, workers)
+    unprotected = [item for item in repos if item.get("protected") is False]
+    toolchains = survey_toolchains(with_versions=False, workers=workers)
+    services, service_warnings = survey_services()
+    warnings.extend(service_warnings)
+    here = inspect_repository(Path.cwd(), nested_depth=2)
+    by_root = Counter(item["root"] for item in repos)
+    return {
+        "host": {
+            "os": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "python": platform.python_version(),
+            "user": os.environ.get("USER") or os.environ.get("LOGNAME") or "",
+            "home": str(Path.home()),
+            "cwd": str(Path.cwd()),
+        },
+        "roots": [
+            {"path": str(root), "repositories": by_root.get(str(root), 0)}
+            for root in roots
+        ],
+        "repositories": {
+            "count": len(repos),
+            "unprotected_count": len(unprotected),
+            "kinds": dict(sorted(Counter(item["kind"] for item in repos).items())),
+            "unprotected_sample": [item["path"] for item in unprotected[:limit or 10]],
+        },
+        "toolchains": toolchains["by_category"],
+        "services": {
+            "count": services["count"],
+            "exposed_beyond_loopback": services["exposed_beyond_loopback"],
+            "ports": sorted({item["port"] for item in services["services"]})[:40],
+        },
+        "current_repository": here,
+        "excluded_from_traversal": dict(sorted(stats.items())),
+    }, warnings
+
+
+# ---------------------------------------------------------------------------
+# Envelope and rendering
+# ---------------------------------------------------------------------------
+
+
+def envelope(command: str, result: Any, warnings: list[str], truncated: bool, elapsed: float) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "tool": TOOL_NAME,
+        "command": command,
+        "read_only": True,
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "elapsed_seconds": round(elapsed, 3),
+        "truncated": truncated,
+        "warnings": warnings,
+        "result": result,
+    }
+
+
+SCHEMA_DOC = {
+    "schema_version": SCHEMA_VERSION,
+    "tool": TOOL_NAME,
+    "envelope": {
+        "schema_version": "int, bumped only on a breaking change",
+        "tool": "always 'warrior-facts'",
+        "command": "which question was asked",
+        "read_only": "always true; this tool has no write path",
+        "generated_at": "ISO-8601 UTC",
+        "elapsed_seconds": "float",
+        "truncated": "true when --limit cut the list; result.count is still the full total",
+        "warnings": "list of strings; things the answer could not see",
+        "result": "command-specific, described below",
+    },
+    "exit_codes": {
+        "0": "answered",
+        "1": "valid question, empty answer (no match, not a repository)",
+        "2": "usage error",
+    },
+    "commands": {
+        "where": "result: {query, roots[], max_depth, count, matches[{path,name,root,relative,depth,match,score,is_repo,repo_kind,markers[]}], excluded_from_traversal{}}",
+        "repos": "result: {roots[], max_depth, scanned, count, unprotected_count, kinds{}, repositories[{path,name,root,relative,depth,kind,remote_names[],transports[],protected,protection}], excluded_from_traversal{}}",
+        "unprotected": "same shape as repos, filtered to protected=false; scanned is the total examined, count the number unprotected",
+        "repo": "result: {path,name,bare,branch,detached,head,upstream,last_commit,counts{staged,modified,untracked},stash_entries,clean,remotes[{name,url,transport}],protected,protection,worktrees[],nested_repositories[],advice[]}",
+        "toolchains": "result: {count, by_category{}, tools[{name,category,path,version,version_note}], missing[]}",
+        "services": "result: {source, protocol, count, exposed_beyond_loopback, services[{port,process,pids[],addresses[],scope,hint}]}",
+        "orient": "result: {host{}, roots[], repositories{}, toolchains{}, services{}, current_repository, excluded_from_traversal{}}",
+    },
+    "invariants": {
+        "remote_urls": "userinfo is replaced with [REDACTED] before printing",
+        "protection": "protected=false when there is no remote, or when every remote is a filesystem path",
+        "traversal": "symlinked directories are never followed; credential directories are never opened",
+        "file_contents": "no project file is ever read; detection is existence checks only",
+    },
+}
+
+
+def line(label: str, value: Any) -> str:
+    return f"  {label:<22}{value}"
+
+
+def render_where(result: dict[str, Any], truncated: bool) -> str:
+    lines = []
+    count = result["count"]
+    if not count:
+        lines.append(f'No match for "{result["query"]}" under {len(result["roots"])} root(s).')
+        for root in result["roots"]:
+            lines.append(f"  searched  {root}")
+        lines.append("  Try a wider --max-depth, or pass --root explicitly.")
+        return "\n".join(lines)
+    shown = len(result["matches"])
+    suffix = f" (showing {shown})" if truncated else ""
+    lines.append(f'{count} match(es) for "{result["query"]}"{suffix}')
+    lines.append("")
+    for item in result["matches"]:
+        flags = []
+        if item["is_repo"]:
+            flags.append(item["repo_kind"])
+        if item["markers"]:
+            flags.append("markers: " + ", ".join(item["markers"][:4]))
+        lines.append(f"  {item['path']}")
+        lines.append(f"      {item['match']:<20}{'  |  '.join(flags) if flags else 'plain directory'}")
+    return "\n".join(lines)
+
+
+def render_repos(result: dict[str, Any], truncated: bool, title: str) -> str:
+    lines = [
+        f"{title}: {result['count']} of {result['scanned']} scanned under "
+        f"{len(result['roots'])} root(s), depth {result['max_depth']}"
+    ]
+    if result.get("unprotected_count") is not None:
+        lines.append(f"  unprotected: {result['unprotected_count']}")
+    if result["kinds"]:
+        lines.append("  kinds: " + ", ".join(f"{key}={value}" for key, value in result["kinds"].items()))
+    lines.append("")
+    for item in result["repositories"]:
+        mark = "  " if item.get("protected") else "! "
+        detail = item.get("protection") or item["kind"]
+        lines.append(f"{mark}{item['path']}")
+        if item.get("protected") is not None:
+            lines.append(f"      {item['kind']:<22}{detail}")
+    if truncated:
+        lines.append("")
+        lines.append(f"  ... {result['count'] - len(result['repositories'])} more (raise --limit, or 0 for all)")
+    if result["excluded_from_traversal"]:
+        lines.append("")
+        lines.append("  pruned: " + ", ".join(
+            f"{key}={value}" for key, value in result["excluded_from_traversal"].items()))
+    return "\n".join(lines)
+
+
+def render_repo(result: dict[str, Any]) -> str:
+    lines = [result["path"]]
+    lines.append(line("branch", result["branch"] or "DETACHED"))
+    lines.append(line("head", result["head"] or "(no commits)"))
+    if result["upstream"]:
+        lines.append(line("upstream", result["upstream"]))
+    if result["last_commit"]:
+        commit = result["last_commit"]
+        lines.append(line("last commit", f"{commit['date']}  {commit['author']}  {commit['subject']}"))
+    counts = result["counts"]
+    lines.append(line(
+        "working tree",
+        f"staged={counts['staged']}  modified={counts['modified']}  untracked={counts['untracked']}  "
+        f"stashes={result['stash_entries']}",
+    ))
+    if result["remotes"]:
+        for remote in result["remotes"]:
+            lines.append(line(f"remote {remote['name']}", f"{remote['url']}  [{remote['transport']}]"))
+    else:
+        lines.append(line("remotes", "none"))
+    lines.append(line("protected", f"{result['protected']} ({result['protection']})"))
+    if len(result["worktrees"]) > 1:
+        lines.append(line("worktrees", str(len(result["worktrees"]))))
+        for path in result["worktrees"]:
+            lines.append(f"      {path}")
+    if result["nested_repositories"]:
+        lines.append(line("nested repos", str(len(result["nested_repositories"]))))
+        for path in result["nested_repositories"][:10]:
+            lines.append(f"      {path}")
+    if result["advice"]:
+        lines.append("")
+        for item in result["advice"]:
+            lines.append(f"  * {item}")
+    return "\n".join(lines)
+
+
+def render_toolchains(result: dict[str, Any]) -> str:
+    lines = [f"{result['count']} tool(s) present on PATH"]
+    lines.append("")
+    current = None
+    for tool in result["tools"]:
+        if tool["category"] != current:
+            current = tool["category"]
+            lines.append(f"  {current}")
+        version = tool["version"] or tool.get("version_note") or ""
+        lines.append(f"    {tool['name']:<14}{version}")
+        lines.append(f"    {'':<14}{tool['path']}")
+    return "\n".join(lines)
+
+
+def render_services(result: dict[str, Any]) -> str:
+    lines = [
+        f"{result['count']} listening TCP socket group(s) via {result['source']}; "
+        f"{result['exposed_beyond_loopback']} reachable beyond loopback"
+    ]
+    lines.append("")
+    for item in result["services"]:
+        hint = f"  ({item['hint']})" if item["hint"] else ""
+        lines.append(
+            f"  {item['port']:<8}{item['process']:<20}{item['scope']:<20}"
+            f"{','.join(item['addresses'])}{hint}"
+        )
+    return "\n".join(lines)
+
+
+def render_orient(result: dict[str, Any]) -> str:
+    host = result["host"]
+    lines = [f"{host['os']} {host['release']} ({host['machine']}), user {host['user']}"]
+    lines.append(line("cwd", host["cwd"]))
+    lines.append("")
+    lines.append("Roots")
+    for root in result["roots"]:
+        lines.append(f"    {root['repositories']:>5} repos   {root['path']}")
+    repos = result["repositories"]
+    lines.append("")
+    lines.append(f"Repositories: {repos['count']} total, {repos['unprotected_count']} unprotected")
+    for path in repos["unprotected_sample"]:
+        lines.append(f"    ! {path}")
+    lines.append("")
+    lines.append("Toolchains")
+    for category, names in result["toolchains"].items():
+        lines.append(f"    {category:<18}{', '.join(names)}")
+    services = result["services"]
+    lines.append("")
+    lines.append(
+        f"Services: {services['count']} listening, {services['exposed_beyond_loopback']} beyond loopback"
+    )
+    if services["ports"]:
+        lines.append("    ports: " + ", ".join(str(port) for port in services["ports"]))
+    here = result["current_repository"]
+    lines.append("")
+    if here:
+        lines.append("Current repository")
+        lines.append(render_repo(here))
+    else:
+        lines.append("Current repository: none (cwd is not inside a Git boundary)")
+    return "\n".join(lines)
+
+
+RENDERERS = {
+    "where": lambda result, truncated: render_where(result, truncated),
+    "repos": lambda result, truncated: render_repos(result, truncated, "Repositories"),
+    "unprotected": lambda result, truncated: render_repos(result, truncated, "Unprotected repositories"),
+    "repo": lambda result, truncated: render_repo(result),
+    "toolchains": lambda result, truncated: render_toolchains(result),
+    "services": lambda result, truncated: render_services(result),
+    "orient": lambda result, truncated: render_orient(result),
+    "schema": lambda result, truncated: json.dumps(result, indent=2, sort_keys=True),
+}
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=TOOL_NAME,
+        description="Read-only answers about this developer's machine.",
+        epilog="This tool never writes. Every Git call is guarded read-only.",
+    )
+    parser.add_argument("--json", action="store_true", help="emit the stable JSON contract")
+    parser.add_argument("--root", action="append", dest="roots", metavar="PATH",
+                        help="search root (repeatable; default: discovered, or $WARRIOR_ROOTS)")
+    parser.add_argument("--max-depth", type=int, default=None, metavar="N",
+                        help="traversal depth below each root (default: 4 for where, 3 otherwise)")
+    parser.add_argument("--limit", type=int, default=None, metavar="N",
+                        help="cap listed items; 0 means no cap")
+    parser.add_argument("--workers", type=int, default=8, metavar="N",
+                        help="parallel Git inspections (default 8)")
+    parser.add_argument("--no-versions", action="store_true",
+                        help="toolchains: report presence and path, do not execute anything")
+    parser.add_argument("--no-git", action="store_true",
+                        help="repos: skip Git inspection, list boundaries only")
+
+    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+    where = subparsers.add_parser("where", help="where is project/repo <name>?")
+    where.add_argument("query", help="name, or a path fragment like VHOSTS/app")
+    subparsers.add_parser("repos", help="what repositories exist under these roots?")
+    subparsers.add_parser("unprotected", help="which repositories have no remote?")
+    repo = subparsers.add_parser("repo", help="what is this repository?")
+    repo.add_argument("path", nargs="?", default=".", help="path inside the repository (default: cwd)")
+    subparsers.add_parser("toolchains", help="what languages and package managers are here?")
+    subparsers.add_parser("services", help="what is listening on this machine?")
+    subparsers.add_parser("orient", help="a cold-start bundle of everything above")
+    subparsers.add_parser("schema", help="print the stable JSON contract")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    command = args.command or "orient"
+
+    if args.max_depth is not None and not 0 <= args.max_depth <= 10:
+        parser.error("--max-depth must be between 0 and 10")
+    if args.limit is not None and args.limit < 0:
+        parser.error("--limit must be 0 or greater")
+    if args.workers < 1 or args.workers > 32:
+        parser.error("--workers must be between 1 and 32")
+
+    started = time.monotonic()
+    warnings: list[str] = []
+    truncated = False
+    exit_code = EXIT_OK
+
+    if command == "schema":
+        result: Any = SCHEMA_DOC
+    elif command == "repo":
+        result = inspect_repository(Path(args.path))
+        if result is None:
+            target = Path(args.path).expanduser().resolve()
+            result = {"path": str(target), "found": False}
+            warnings.append(f"{target} is not inside a Git boundary.")
+            exit_code = EXIT_NOT_FOUND
+    elif command == "toolchains":
+        result = survey_toolchains(with_versions=not args.no_versions, workers=args.workers)
+    elif command == "services":
+        result, service_warnings = survey_services()
+        warnings.extend(service_warnings)
+    else:
+        roots, root_warnings = resolve_roots(args.roots)
+        warnings.extend(root_warnings)
+        if not roots:
+            print("No readable search roots. Pass --root PATH.", file=sys.stderr)
+            return EXIT_USAGE
+        if command == "where":
+            depth = args.max_depth if args.max_depth is not None else 4
+            limit = args.limit if args.limit is not None else 50
+            result, truncated = find_where(args.query, roots, depth, limit)
+            if not result["count"]:
+                exit_code = EXIT_NOT_FOUND
+        elif command in {"repos", "unprotected"}:
+            depth = args.max_depth if args.max_depth is not None else 3
+            limit = args.limit if args.limit is not None else 100
+            with_git = not args.no_git or command == "unprotected"
+            result, truncated = survey_repositories(
+                roots, depth, limit, args.workers, with_git,
+                only_unprotected=command == "unprotected",
+            )
+            if not result["count"]:
+                exit_code = EXIT_NOT_FOUND
+        else:  # orient
+            depth = args.max_depth if args.max_depth is not None else 3
+            limit = args.limit if args.limit is not None else 10
+            result, orient_warnings = orient(roots, depth, args.workers, limit)
+            warnings.extend(orient_warnings)
+
+    elapsed = time.monotonic() - started
+    if args.json:
+        payload = envelope(command, result, warnings, truncated, elapsed)
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        if isinstance(result, dict) and result.get("found") is False:
+            print(f"{result['path']} is not inside a Git repository.")
+        else:
+            print(RENDERERS[command](result, truncated))
+        for warning in warnings:
+            print(f"  ! {warning}", file=sys.stderr)
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
