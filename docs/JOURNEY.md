@@ -1,0 +1,175 @@
+# The journey
+
+This is written for one specific reader: someone who knows git — really
+knows it, could explain a merge commit at a dinner party — but has never
+*trusted* it. Maybe you used a GUI for years because it made state visible in
+a way the terminal never did. Maybe you've been burned before, on a real
+project, and the fear that followed was a rational response to a tool with
+real footguns, not a gap in your understanding.
+
+That's the audience. If that's you, keep reading. Each chapter: what you'll
+find, the exact command, how to read what comes back, what's safe, what
+isn't, and what to do next.
+
+## The mental model, first
+
+Work you do in a git repository can live in one of four places, and most of
+the fear around git comes from not knowing which place a given piece of work
+is currently in:
+
+1. **The working tree** — files on disk, as you see them in your editor.
+2. **The index** (also called "the stage") — what's queued for the next
+   commit. `git add` moves things here.
+3. **The object store** — committed history. Once something's here and a
+   branch or tag points at it, it's genuinely durable.
+4. **Somewhere else entirely** — a shelf, a stash, an index-only blob with no
+   working-tree copy, a commit no branch points at anymore. This is the
+   category git hides best, and it's where most of what this tool finds
+   actually lives.
+
+The commands that move work between these places are the ones people fear:
+`reset` (moves things backward, sometimes destructively), `checkout`
+(overwrites the working tree from elsewhere), `clean` (deletes untracked
+files), `stash drop` / `gc` (lets category 4 expire). Once you know which
+category your work is in, you know exactly which commands are safe to run
+near it and which aren't. That's the whole trick.
+
+## Chapter 1 — See what git hides from you
+
+```bash
+python3 bin/warrior-scan ~/code
+```
+
+This reads. It never writes, stages, commits, stashes, or deletes anything —
+that's not a promise in a README, it's enforced by a single guarded choke
+point that every git call in the tool passes through, checked one token at a
+time, adversarially tested against the tool's own guard.
+
+Read the output top to bottom — it's sorted worst-first:
+
+- **CRITICAL** — the only copy of something real, and git will never show it
+  to you unprompted. Deal with these first.
+- **HIGH** — one copy exists, but it's at least visible if you go looking
+  (an unmirrored repo, a stash).
+- **MEDIUM** — recoverable today, but sitting on a clock (git's default
+  garbage collection eventually prunes unreachable objects).
+- **INFO** — not urgent, but you should understand it before you run a broad
+  command near it (a symlinked directory that's really the same repo twice,
+  a bare repository that isn't a normal working tree).
+
+If it finds nothing: good, genuinely. That's real information, not a failure
+of the tool.
+
+## Chapter 2 — Rescue it, without breaking anything
+
+Every CRITICAL and HIGH finding has a safe recovery path. The rule that
+matters most: **copy before you touch the original.** Never apply a shelf,
+pop a stash, or reset toward a found commit as your first move — copy the
+content out somewhere separate first, verify the original is untouched, and
+only then decide what to do with the original.
+
+- **A shelf** (JetBrains IDEs) is a `.patch` file. `git apply --check
+  <the.patch>` in the right repository tells you if it would apply cleanly,
+  without touching anything. Copy the `.patch` file itself out first.
+- **A stash** is `git stash show -p stash@{N}` to look, `git show <sha>` if
+  you have the commit SHA directly (stashes are commits — the SHA survives
+  even if the stash entry itself is later dropped). `git stash apply` (not
+  `pop`) keeps the stash entry after applying, in case you need to look again.
+- **An index-only blob** — content staged, then deleted from the working
+  tree, so it exists only in `.git/index` — is recovered with `git cat-file
+  -p <blob-sha>`, found via `git ls-files --stage -- <path>`. This is the
+  most fragile category: a `git reset` on that path removes it from the
+  index with no reflog entry pointing back to it. Copy it out immediately.
+- **An unreachable commit** — no branch or tag points at it — is still fully
+  inspectable with `git show <sha>` and fully restorable with `git
+  cherry-pick <sha>` or by creating a new branch at it (`git branch
+  recovered <sha>`). It only truly disappears once `git gc` prunes it, which
+  by default happens to objects unreachable for more than two weeks.
+
+None of these recovery commands mutate the original location. That's
+deliberate: recovery should never require you to trust that you got the
+first step right.
+
+## Chapter 3 — Know your estate
+
+```bash
+python3 bin/warrior-facts where <name>
+python3 bin/warrior-facts repos --root ~/code
+python3 bin/warrior-facts unprotected --root ~/code
+```
+
+This answers the questions you'd otherwise answer by remembering, or by
+`find`-ing around and hoping: where is this project, what repositories exist
+under this root, which of them have no remote at all. It's read-only, bounded
+in depth, and never follows a symlink outside the root you gave it.
+
+## Chapter 4 — Give every repo a home
+
+```bash
+python3 bin/warrior-protect ~/code/some-old-project
+python3 bin/warrior-protect ~/code/some-old-project --apply
+```
+
+Dry run first, always — that's the default, not a flag you have to remember.
+It tells you what it would do before it does anything. `--apply` creates a
+repository on your configured git server if one doesn't exist, adds a remote,
+pushes, and then — this is the part that matters — **verifies by checking
+that your local `HEAD` actually appears in the server's own refs.** Not by
+trusting that the push command exited with code `0`. That distinction is not
+paranoia: a filesystem-path push into an already-up-to-date repository exits
+`0` having sent nothing at all, and looks identical to success unless you
+check.
+
+## Chapter 5 — Name what things are for
+
+```bash
+python3 bin/warrior-classify
+python3 bin/warrior-classify --apply-topics
+```
+
+Not every repository on your server is the same *kind* of thing. Some are
+your own work. Some are mirrors of someone else's code you depend on. Some
+are archives you're keeping but not developing. Treating all of them the
+same way — "push everything" — is how a server-side mirror flag
+(`is_mirror`, meaning "this syncs from somewhere else") gets confused with
+*ownership*, which is a real mistake this tool's own author made once: it
+mislabelled repositories that were mirrors of the author's own GitHub account
+as if they were someone else's code, because the mirror flag describes the
+sync mechanism, not who wrote the thing. Caught by spot-checking a result
+before trusting it at scale — which is the actual lesson, more than the bug
+itself.
+
+## An honest example: routing work to a cheap model
+
+Part of this project's roadmap is routing well-specified mechanical work to
+cheaper models instead of doing everything with an expensive one. Here's
+what actually happened the first time that was tried for real, kept in here
+because a guide that only shows the version where everything works isn't
+useful.
+
+Three writing tasks — a license file, a safety document, a roadmap document —
+were sent to a cheap model through an existing task queue. Two came back with
+genuinely usable prose. The third came back having failed every tool call it
+attempted, because the queue profile that ran it was deliberately configured
+read-only — no write access, by design, matching the rest of the system's
+default-deny posture. That wasn't a bug to route around; it was the correct
+policy operating correctly, and the fix was to treat the model's *text
+response* as a draft to review and place by hand, not as a finished file.
+
+One of the two "successful" results still needed real editing: it drifted
+into reassurance language ("users can have confidence in the security...")
+in a document that had explicitly been asked to state facts, not reassure —
+and it slightly misdescribed one of its own safety guards. Caught by reading
+it before shipping it, not by trusting that "the task completed" meant "the
+content is right."
+
+The honest summary: cheap-model routing for mechanical work is real and
+worth doing. It is not yet unsupervised. Every result needs a human — or
+another model acting as a checker — verifying both that something actually
+landed, and that what landed is true.
+
+## What comes next
+
+Chapters past this point don't exist yet. `docs/ROADMAP.md` says so
+explicitly, and repeats it, because the easiest way to erode trust in a tool
+like this is to describe tomorrow's plan as though it shipped today.
