@@ -1,0 +1,18 @@
+# Python bytecode — regenerated on every run, never source
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS Finder metadata
+.DS_Store
+
+# Local machine configuration — this repo must stay portable, so anything
+# machine-specific belongs here, never in tracked source.
+.warrior/
+*.local.json
+
+# Scan reports — these can contain paths from a real machine. Never commit
+# a report generated against someone's estate.
+*-report.json
+*-report.txt
