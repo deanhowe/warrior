@@ -15,16 +15,23 @@
     "grep"
   ],
   "toolsSettings": {
-    "fs_read": { "requireApproval": "never" },
-    "glob": { "requireApproval": "never" },
-    "grep": { "requireApproval": "never" },
+    "fs_read": {
+      "requireApproval": "never"
+    },
+    "glob": {
+      "requireApproval": "never"
+    },
+    "grep": {
+      "requireApproval": "never"
+    },
     "shell": {
       "allowedCommands": [
-        "python3 bin/warrior-scan.*",
-        "python3 bin/warrior-facts.*",
-        "python3 bin/warrior-protect .+( --apply)?$",
-        "python3 bin/warrior-classify.*",
-        "python3 bin/warrior-credits.*",
+        "cd \\S+",
+        "(python3 )?(\\.?/?bin/|[^\\s]*/bin/)?warrior-scan.*",
+        "(python3 )?(\\.?/?bin/|[^\\s]*/bin/)?warrior-facts.*",
+        "(python3 )?(\\.?/?bin/|[^\\s]*/bin/)?warrior-credits.*",
+        "(python3 )?(\\.?/?bin/|[^\\s]*/bin/)?warrior-classify.*",
+        "(python3 )?(\\.?/?bin/|[^\\s]*/bin/)?warrior-protect .+( --apply)?$",
         "git status.*",
         "git diff.*",
         "git log.*",
