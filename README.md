@@ -49,23 +49,23 @@ with what it finds is next.
 
 ## What's here today
 
-Five tools, all read-only or additive, all with real tests, all adversarially
-audited before being trusted:
+Five tools, all read-only or additive, all with real tests:
 
-| Tool | What it does |
-|---|---|
-| `warrior-scan` | Finds the eleven ways work can be invisible to git — shelves, stashes, index-only content, unreachable commits, unmirrored repos, and more |
-| `warrior-facts` | Answers questions about your machine: where is this repo, what exists under this root, what's unprotected |
-| `warrior-protect` | Gives an unprotected repository a real, *verified* home on a git server — verified by checking the server's own refs, never by trusting an exit code |
-| `warrior-classify` | Works out what each repository on your server is *for* — your own code, a mirror of someone else's, an archive — and records it |
-| `warrior-credits` | Live credit/quota balance across every AI harness you run, at zero token cost, without spending a prompt to ask |
+| Tool | What it does | Adversarial review |
+|---|---|---|
+| `warrior-scan` | Finds the eleven ways work can be invisible to git — shelves, stashes, index-only content, unreachable commits, unmirrored repos, and more | Full — three independent agents tried to break it; found 4 real bugs, all fixed |
+| `warrior-protect` | Gives an unprotected repository a real, *verified* home on a git server — verified by checking the server's own refs, never by trusting an exit code | Shares `warrior-scan`'s guarded write path; spot-tested live against real destructive attempts |
+| `warrior-classify` | Works out what each repository on your server is *for* — your own code, a mirror of someone else's, an archive — and records it | Same shared guard; spot-tested live |
+| `warrior-facts` | Answers questions about your machine: where is this repo, what exists under this root, what's unprotected | Unit-tested; has no write path at all by design, which is its own safety argument |
+| `warrior-credits` | Live credit/quota balance across every AI harness you run, at zero token cost, without spending a prompt to ask | Unit-tested; one real cross-Python-version bug found and fixed (broke under macOS's default Python 3.9, worked under 3.14) |
 
-Every one of them was extracted from a working production system where it
-was built under real pressure, then adversarially audited by agents whose
-only job was to try to break it. That audit found **four real bugs** in the
-scanner alone — including one where a mistyped `--output` flag overwrote a
-repository's `.git/HEAD` and broke it. All four are fixed. `docs/SAFETY.md`
-explains exactly what protects you now and why each protection exists.
+`warrior-scan` is the one that's been through the same treatment this whole
+project is built to teach: extracted from a working production system, then
+handed to agents whose only job was to try to break it. That audit found
+**four real bugs**, including one where a mistyped `--output` flag overwrote
+a repository's `.git/HEAD` and broke it. All four are fixed. `docs/SAFETY.md`
+explains exactly what protects you now, why each protection exists, and which
+tools have and haven't had the full treatment yet.
 
 ## What's not here yet
 

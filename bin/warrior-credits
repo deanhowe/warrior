@@ -231,7 +231,14 @@ def fetch_kiro(timeout_seconds: int = 20) -> dict[str, Any]:
     # A real login shell, not a direct exec: confirmed live that kiro-cli
     # degrades or hangs without real login-shell ancestry (observed under
     # both launchd and a GUI app's Process() API).
-    shell_cmd = f'exec "{binary}" chat --no-interactive --agent kiro_default "/usage"'
+    #
+    # The binary path is interpolated into a shell string (unavoidable - it's
+    # what makes this a login shell rather than a direct exec), so it must be
+    # escaped even though it comes from `which` rather than user input: an
+    # unescaped embedded double-quote in the path would break out of the
+    # quoting. Found by adversarial review, not by an actual exploit.
+    escaped_binary = binary.replace("\\", "\\\\").replace('"', '\\"')
+    shell_cmd = f'exec "{escaped_binary}" chat --no-interactive --agent kiro_default "/usage"'
     process = subprocess.Popen(
         ["/bin/zsh", "-l", "-c", shell_cmd],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -358,7 +365,14 @@ def setup_copilot_footer() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("harness", nargs="*", choices=list(FETCHERS.keys()),
+    # No `choices=` on this positional: argparse's handling of `nargs='*'`
+    # combined with `choices` differs across Python versions (reproduced:
+    # Python 3.9's stdlib rejects the empty-list default against `choices`
+    # outright; Python 3.14 does not). Since this is macOS's still-common
+    # system Python, that would break the tool for a real share of users on
+    # first run. Validated manually below instead, for a consistent error on
+    # every version.
+    parser.add_argument("harness", nargs="*",
                         help="which harness to check (default: all installed)")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--setup-copilot-footer", action="store_true",
@@ -367,6 +381,11 @@ def main() -> int:
 
     if arguments.setup_copilot_footer:
         return setup_copilot_footer()
+
+    unknown = [name for name in arguments.harness if name not in FETCHERS]
+    if unknown:
+        parser.error(f"argument harness: invalid choice: {unknown[0]!r} "
+                     f"(choose from {', '.join(sorted(FETCHERS))})")
 
     targets = arguments.harness or list(FETCHERS.keys())
     results: dict[str, Any] = {}

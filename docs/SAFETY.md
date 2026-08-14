@@ -51,3 +51,19 @@ elsewhere safe, and it does not replace verifying an action's effect — an
 exit code of `0` is not proof anything happened correctly; several findings
 in this project's own history came from things that returned success while
 doing the wrong thing, or nothing at all.
+
+## Adversarial review coverage, stated per tool
+
+Only `warrior-scan` has had the full treatment this contract describes:
+independent agents actively trying to break it, live against real
+repositories, not just reading the code. That's where the four bugs above
+came from. `warrior-protect` and `warrior-classify` share its guarded
+`--output` path and were spot-tested live against the same destructive
+attempts, but haven't had an independent adversarial pass of their own.
+`warrior-facts` has no write path at all, which is a different kind of
+safety argument than "audited and found clean." `warrior-credits` has had
+one real bug found this way — a shell-command construction that broke
+cross-Python-version, fixed — but not a dedicated adversarial pass either.
+
+Don't read "these guards exist" as "every tool has been proven to enforce
+them under attack." Only one has, so far.
