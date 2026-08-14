@@ -1,0 +1,22 @@
+{
+  "name": "warrior",
+  "owner": {
+    "name": "the Warrior project contributors"
+  },
+  "description": "Never lose work, and build real software the way an experienced engineer does \u2014 as an installable Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "warrior",
+      "source": "./",
+      "description": "Preservation-first git tooling married with real-engineering practice skills: TDD, code review, spec/ticket flows, domain modelling, and never losing work you didn't know was at risk.",
+      "category": "engineering",
+      "keywords": [
+        "git",
+        "preservation",
+        "engineering",
+        "tdd",
+        "code-review"
+      ]
+    }
+  ]
+}

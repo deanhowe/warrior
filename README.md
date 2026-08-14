@@ -18,15 +18,20 @@ found:
   but the one copy on disk
 
 None of that is carelessness. It's what happens when a tool hides state and
-only ever shows you one slice of it at a time. If you've ever felt afraid of
-git — not because you don't understand it, but because you've been burned by
-it — that fear is a rational response to a real problem, not a gap in your
-knowledge.
+only ever shows you one slice of it at a time.
 
-Warrior is the tool that finds what git isn't showing you, and gets it
-somewhere safe, before you touch anything else.
+**Warrior is two things married into one plugin**: preservation-first git
+tooling that finds what's at risk before you touch anything, and a set of
+real-engineering practice skills — TDD, code review, spec/ticket flows,
+domain modelling — sourced from
+[mattpocock/skills](https://github.com/mattpocock/skills) (MIT, see
+`NOTICES/`). Neither half is complete without the other: practising good
+engineering on a machine that's quietly losing work isn't safety, and never
+losing anything is worthless if what you keep was never any good.
 
 ## Quick start
+
+Read-only, no configuration required, no network access:
 
 ```bash
 git clone <this-repo>
@@ -34,8 +39,7 @@ cd warrior
 python3 bin/warrior-scan ~/code
 ```
 
-That's it. Read-only, no configuration required, no network access. It
-prints what it found, ranked by how bad it would be to lose:
+It prints what it found, ranked by how bad it would be to lose:
 
 ```
 CRITICAL — only copy of real work, and Git will not show it to you
@@ -44,41 +48,112 @@ MEDIUM    — recoverable today, but on an expiry clock
 INFO      — structural: understand it before you move or clean anything
 ```
 
-Nothing is fixed automatically. `warrior-scan` only ever reads. What you do
-with what it finds is next.
+## Install as a Claude Code plugin
 
-## What's here today
+```
+/plugin marketplace add <this-repo>
+/plugin install warrior
+```
 
-Five tools, all read-only or additive, all with real tests:
+`.claude-plugin/marketplace.json` makes this repo its own single-plugin
+marketplace, the same pattern upstream uses. Run
+`claude plugin validate . --strict` after touching either manifest file.
 
-| Tool | What it does | Adversarial review |
-|---|---|---|
-| `warrior-scan` | Finds the eleven ways work can be invisible to git — shelves, stashes, index-only content, unreachable commits, unmirrored repos, and more | Full — three independent agents tried to break it; found 4 real bugs, all fixed |
-| `warrior-protect` | Gives an unprotected repository a real, *verified* home on a git server — verified by checking the server's own refs, never by trusting an exit code | Shares `warrior-scan`'s guarded write path; spot-tested live against real destructive attempts |
-| `warrior-classify` | Works out what each repository on your server is *for* — your own code, a mirror of someone else's, an archive — and records it | Same shared guard; spot-tested live |
-| `warrior-facts` | Answers questions about your machine: where is this repo, what exists under this root, what's unprotected | Unit-tested; has no write path at all by design, which is its own safety argument |
-| `warrior-credits` | Live credit/quota balance across every AI harness you run, at zero token cost, without spending a prompt to ask | Unit-tested; one real cross-Python-version bug found and fixed (broke under macOS's default Python 3.9, worked under 3.14) |
+## What's here
 
-`warrior-scan` is the one that's been through the same treatment this whole
-project is built to teach: extracted from a working production system, then
-handed to agents whose only job was to try to break it. That audit found
-**four real bugs**, including one where a mistyped `--output` flag overwrote
-a repository's `.git/HEAD` and broke it. All four are fixed. `docs/SAFETY.md`
-explains exactly what protects you now, why each protection exists, and which
-tools have and haven't had the full treatment yet.
+### Preservation — the layer everything else sits on
+
+Five tools in `bin/`, all read-only or additive:
+
+| Tool | What it does |
+|---|---|
+| `warrior-scan` | Finds the eleven ways work can be invisible to git — shelves, stashes, index-only content, unreachable commits, unmirrored repos, and more |
+| `warrior-facts` | Answers questions about your machine: where is this repo, what exists under this root, what's unprotected |
+| `warrior-protect` | Gives an unprotected repository a real, *verified* home on a git server — verified by checking the server's own refs, never by trusting an exit code |
+| `warrior-classify` | Works out what each repository on your server is *for* — your own code, a mirror of someone else's, an archive — and records it |
+| `warrior-credits` | Live credit/quota balance across every AI harness you run, at zero token cost, without spending a prompt to ask |
+
+`warrior-scan` has had the full adversarial treatment — three independent
+agents trying to break it, live, against real repositories — and found four
+real bugs, now fixed. `docs/SAFETY.md` states exactly what's proven per tool,
+not a blanket claim. See `docs/JOURNEY.md` for the full guided path.
+
+Three skills in `skills/preservation/` bring this discipline into an agent
+session directly — see `skills/preservation/README.md`.
+
+### Engineering and productivity — real practice, not vibes
+
+These split on one axis — who can invoke them. **User-invoked** skills are
+reachable only when you type them (e.g. `/grill-me`); their job is to
+orchestrate. **Model-invoked** skills can be invoked by you *or* reached for
+automatically by the agent when the task fits; they hold the reusable
+discipline.
+
+#### Engineering
+
+Daily code work.
+
+**User-invoked**
+
+- **[ask-matt](./skills/engineering/ask-matt/SKILL.md)** — Ask which skill or flow fits your situation. A router over the user-invoked skills in this repo.
+- **[grill-with-docs](./skills/engineering/grill-with-docs/SKILL.md)** — Grilling session that also builds your project's domain model, sharpening terminology and updating `CONTEXT.md` and ADRs inline.
+- **[triage](./skills/engineering/triage/SKILL.md)** — Move issues through a state machine of triage roles.
+- **[improve-codebase-architecture](./skills/engineering/improve-codebase-architecture/SKILL.md)** — Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick.
+- **[setup-matt-pocock-skills](./skills/engineering/setup-matt-pocock-skills/SKILL.md)** — Configure this repo for the engineering skills (issue tracker, triage labels, domain doc layout). Run once per repo before using the other engineering skills.
+- **[to-spec](./skills/engineering/to-spec/SKILL.md)** — Turn the current conversation into a spec and publish it to the issue tracker.
+- **[to-tickets](./skills/engineering/to-tickets/SKILL.md)** — Break any plan, spec, or conversation into a set of tracer-bullet tickets, each declaring its blocking edges.
+- **[implement](./skills/engineering/implement/SKILL.md)** — Build the work described by a spec or set of tickets, driving `/tdd` at pre-agreed seams and closing out with `/code-review` before committing.
+- **[wayfinder](./skills/engineering/wayfinder/SKILL.md)** — Plan a huge chunk of work, more than one agent session can hold, as a shared map of decision tickets resolved one at a time.
+
+**Model-invoked**
+
+- **[prototype](./skills/engineering/prototype/SKILL.md)** — Build a throwaway prototype to answer a design question.
+- **[diagnosing-bugs](./skills/engineering/diagnosing-bugs/SKILL.md)** — Disciplined diagnosis loop for hard bugs and performance regressions.
+- **[research](./skills/engineering/research/SKILL.md)** — Investigate a question against high-trust primary sources and capture the findings as a cited Markdown file.
+- **[tdd](./skills/engineering/tdd/SKILL.md)** — Test-driven development with a red-green-refactor loop, one vertical slice at a time.
+- **[domain-modeling](./skills/engineering/domain-modeling/SKILL.md)** — Actively build and sharpen a project's domain model.
+- **[codebase-design](./skills/engineering/codebase-design/SKILL.md)** — Shared discipline and vocabulary for designing deep modules.
+- **[code-review](./skills/engineering/code-review/SKILL.md)** — Two-axis review of the diff since a fixed point: Standards and Spec, run as parallel sub-agents.
+- **[resolving-merge-conflicts](./skills/engineering/resolving-merge-conflicts/SKILL.md)** — Work through an in-progress merge or rebase conflict hunk by hunk, never `--abort`.
+- **[wizard](./skills/engineering/wizard/SKILL.md)** — Generate an interactive bash wizard for steps only a human can perform.
+
+#### Productivity
+
+General workflow tools, not code-specific.
+
+**User-invoked**
+
+- **[grill-me](./skills/productivity/grill-me/SKILL.md)** — Get relentlessly interviewed about a plan or design until every branch is resolved.
+- **[handoff](./skills/productivity/handoff/SKILL.md)** — Compact the current conversation into a handoff document.
+- **[teach](./skills/productivity/teach/SKILL.md)** — Teach the user a new skill or concept over multiple sessions.
+- **[to-questionnaire](./skills/productivity/to-questionnaire/SKILL.md)** — Turn a decision you can't answer alone into a Markdown questionnaire for the person who can.
+- **[wait-what](./skills/productivity/wait-what/SKILL.md)** — Fire this the moment a message doesn't land; the agent re-pitches it in plain English.
+
+**Model-invoked**
+
+- **[grilling](./skills/productivity/grilling/SKILL.md)** — The reusable interview primitive behind `grill-me`, `grill-with-docs`, `triage`, `wayfinder` and `improve-codebase-architecture`.
+- **[writing-for-agents](./skills/productivity/writing-for-agents/SKILL.md)** — Write documentation and instructions an agent will actually follow correctly.
+
+### Not part of the plugin, but worth knowing about
+
+`skills/misc/git-guardrails-claude-code` — a Claude Code hook that blocks
+dangerous git commands (`push`, `reset --hard`, `clean`, `branch -D`) before
+they execute. It's the other half of the preservation coin: guardrails stop
+the destructive command from running at all, `warrior-scan` finds and
+recovers what's already at risk. Install it separately per its own `SKILL.md`.
 
 ## What's not here yet
 
-Chapter 1 — "know your machine, never lose work" — is what ships today.
-Everything past that is a roadmap, not a feature: your own private git
-server, durable memory of decisions, routing work to cheap models
-automatically, bridging multiple AI coding agents together. See
-`docs/ROADMAP.md` for the honest version, including what's proven and what
-isn't.
+`docs/ROADMAP.md` — the honest version of what's proven versus what's still
+a direction, not a feature.
 
-`docs/JOURNEY.md` is the guided path through Chapter 1 — what to run, in what
-order, and how to read what comes back, written for someone who knows git but
-has never trusted it.
+## Attribution
+
+`skills/engineering/`, `skills/productivity/`, and
+`skills/misc/git-guardrails-claude-code/` are sourced unmodified from
+[mattpocock/skills](https://github.com/mattpocock/skills), MIT licensed.
+See `NOTICES/` for the full license text and provenance. Everything else is
+original work under this repo's own `LICENSE`.
 
 ## Who this is for
 
@@ -87,4 +162,5 @@ because you don't understand the command line, but because it made state
 *visible* in a way the CLI never did. You have projects going back a decade.
 You're not sure what's actually backed up. You've been burned before. That's
 not a knowledge gap — it's a rational response to a tool that hides things.
-This is built for you.
+And separately: you want to build software the way an experienced engineer
+does, not just the way that happens to compile. This is built for both.
