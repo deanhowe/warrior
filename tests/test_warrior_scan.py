@@ -375,7 +375,12 @@ class ReadOnlyGuardTest(unittest.TestCase):
     def test_the_report_write_refuses_to_destroy_anything(self):
         """An audit broke a real repository by overwriting .git/HEAD via
         --output. These three refusals are what stop that happening again."""
-        self.assertIn('if any(part == ".git" for part in destination.parts):', SOURCE)
+        self.assertIn('if any(part == ".git" or part.endswith(".git")', SOURCE)
+        # Audit finding: --output happily wrote a .sh file. A report is data;
+        # refusing script and dotfile destinations stops --output being a way
+        # to plant executable content.
+        self.assertIn('destination.suffix.lower() not in', SOURCE)
+        self.assertIn('destination.name.startswith(".")', SOURCE)
         self.assertIn("if destination.exists() and not args.force:", SOURCE)
         self.assertIn("if not destination.parent.is_dir():", SOURCE)
         # mkdir -p of arbitrary trees must be gone entirely.

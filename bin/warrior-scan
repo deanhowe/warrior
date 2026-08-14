@@ -1259,8 +1259,19 @@ def main() -> int:
         # Refuse to clobber, refuse to write inside .git, and never mkdir -p
         # arbitrary trees.
         destination = args.output.expanduser()
-        if any(part == ".git" for part in destination.parts):
-            print(f"refusing to write inside a .git directory: {destination}",
+        if any(part == ".git" or part.endswith(".git") for part in destination.parts):
+            print(f"refusing to write inside a git directory: {destination}",
+                  file=sys.stderr)
+            return 2
+        # Restrict the extension. A report is data; refusing to write it as a
+        # script or a dotfile stops --output being a way to plant executable
+        # content. (Found in audit: this happily wrote a .sh file.)
+        if destination.suffix.lower() not in {".json", ".txt", ".md", ".log"}:
+            print(f"--output must end in .json, .txt, .md or .log "
+                  f"(got {destination.name!r})", file=sys.stderr)
+            return 2
+        if destination.name.startswith("."):
+            print(f"refusing to write to a dotfile: {destination.name}",
                   file=sys.stderr)
             return 2
         if destination.exists() and not args.force:
