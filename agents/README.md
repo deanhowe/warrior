@@ -4,9 +4,14 @@ One persona, three harnesses, stated honestly by how tested each one is.
 
 | File | Harness | Tested? |
 |---|---|---|
-| `claude-warrior.md` | Claude Code subagent | Not yet run. Written to Claude Code's documented subagent format, following the same rules as the other two, but this exact file has not been exercised end-to-end. |
-| `kiro-warrior.json` | Kiro CLI agent | Not yet run. Modelled directly on a real, working, deny-by-default Kiro config from the private system this project was extracted from — the shape is proven, this exact file is not. |
-| `copilot-warrior.md` | GitHub Copilot | Not an agent config — Copilot has no verified equivalent JSON format on the machine this was built on, and this project won't invent one and present it as real. This is content for `.github/copilot-instructions.md`, Copilot's actual documented mechanism for persistent repo-level instructions. |
+| `claude-warrior.md` | Claude Code subagent | **Not yet run, and can't be from inside a running session** — Claude Code loads subagent definitions at startup, not live. Written to the documented format, following the same rules as the other two, but that's a review claim, not a tested one. |
+| `kiro-warrior.json` | Kiro CLI agent | **Tested live, and it initially failed.** Kiro checks each `&&`-joined shell sub-command against `allowedCommands` separately, not as one compound string — the agent's own `warrior-scan` calls were rejected by its own allowlist on first run. Fixed by allowing bare `cd <path>` as its own pattern (harmless alone: no read, write, or execute). Retested: the agent ran `warrior-scan` on this repository for real and correctly summarized a genuine finding. |
+| `copilot-warrior.md` | GitHub Copilot | **Tested live via ACP session/prompt.** Content installed as `.github/copilot-instructions.md`, asked directly what it must do before any git operation, answered correctly from the instructions on the first attempt — no editing needed. Not an agent-JSON config: Copilot has no verified equivalent format on the machine this was built on, and this project won't invent one and present it as real. |
+
+Two of three have now been run for real, not just reviewed. The Kiro result
+is the reason this table exists: the file looked correct — valid JSON,
+sensible patterns — and was still broken until it was actually executed.
+Review and testing are different claims; say which one you mean.
 
 ## Install
 
