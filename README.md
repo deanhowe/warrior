@@ -98,7 +98,7 @@ agents trying to break it, live, against real repositories — and found four
 real bugs, now fixed. `docs/SAFETY.md` states exactly what's proven per tool,
 not a blanket claim. See `docs/JOURNEY.md` for the full guided path.
 
-Three skills in `skills/preservation/` bring this discipline into an agent
+Five skills in `skills/preservation/` bring this discipline into an agent
 session directly — see `skills/preservation/README.md`.
 
 ### Engineering and productivity — real practice, not vibes
@@ -115,7 +115,7 @@ Daily code work.
 
 **User-invoked**
 
-- **[ask-matt](./skills/engineering/ask-matt/SKILL.md)** — Ask which skill or flow fits your situation. A router over the user-invoked skills in this repo.
+- **[ask-warrior](./skills/engineering/ask-warrior/SKILL.md)** — Ask which skill or flow fits your situation. A router over the user-invoked skills in this repo.
 - **[grill-with-docs](./skills/engineering/grill-with-docs/SKILL.md)** — Grilling session that also builds your project's domain model, sharpening terminology and updating `CONTEXT.md` and ADRs inline.
 - **[triage](./skills/engineering/triage/SKILL.md)** — Move issues through a state machine of triage roles.
 - **[improve-codebase-architecture](./skills/engineering/improve-codebase-architecture/SKILL.md)** — Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick.
