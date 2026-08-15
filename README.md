@@ -75,6 +75,24 @@ Seven tools in `bin/`, all read-only or additive:
 | `warrior-server-status` | Is your git forge actually healthy right now — reachability, disk headroom, mirror staleness, backup freshness — not just whether it answers HTTP 200 |
 | `warrior-sidecar` | Give a project a named, versioned space beside it that its own history never sees — goals, tmp, wiki — instead of a gitignored directory with zero protection |
 
+### macOS 26 native ML tools (companion repo)
+
+28 Swift CLI tools wrapping Apple's on-device ML frameworks — zero cost, no
+API keys, no network, no tokens. OCR, transcription, vision, embeddings,
+sentiment, summarisation, classification, and more.
+
+```bash
+git clone git@github.com:deanhowe/ml-tools.git
+export PATH="$PWD/ml-tools:$PATH"
+ml-ocr document.png        # instant, local, free
+ml-transcribe recording.m4a
+ml-vision classify photo.jpg
+```
+
+Requires macOS 26 (Tahoe) and Swift 6.2+. See the ml-tools README for the
+full list. These are not bundled inside Warrior to avoid duplication — they're
+a standalone repo, usable independently.
+
 `warrior-scan` has had the full adversarial treatment — three independent
 agents trying to break it, live, against real repositories — and found four
 real bugs, now fixed. `docs/SAFETY.md` states exactly what's proven per tool,
