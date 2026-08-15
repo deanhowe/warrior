@@ -114,6 +114,50 @@ Two details that will bite otherwise:
   Verify with the actual client path (`curl`, a browser, `ping`) or by querying
   the resolver's address and port explicitly.
 
+### Never point a second forge instance at the live config
+
+Testing a new forge build against "a copy of the data" is the obvious safe
+move, and it is a trap. A forge rewrites every repository's git hooks to
+embed the absolute path of the binary and config file it was started with.
+Start a test instance with the production config - or with a config copied
+from it that still names any production path - and it will rewrite the hooks
+of every repository on the server to point at your temporary directory. The
+forge keeps serving reads perfectly, so nothing looks wrong. Every push then
+fails with an opaque hook error, and it stays broken after you kill the test
+instance, because the damage is on disk in each repository.
+
+This happened on a live 272-repository instance (2026-08-15) and went
+unnoticed until an unrelated push failed minutes later.
+
+- Give a test instance its own config with **no** production path in it: its
+  own work path, data path, database, indexer paths, and port. Copying the
+  real config and overriding two values is not enough - the ones you forget
+  are the ones that do the damage.
+- Prefer a different machine or container entirely if the forge is live.
+- Most forges ship a hook-regeneration command
+  (Gitea: `gitea admin regenerate hooks --config <production config>`). Know
+  it **before** you need it, and check a hook file's contents after any test
+  run: the path inside it should name production, and nothing else.
+
+### Build the forge the way it was originally built
+
+If you build the forge from source rather than using a release binary, the
+build flags are part of the artifact, not a detail. Gitea's `make build` with
+no `TAGS` produces a binary that silently uses a stale embedded asset blob
+instead of the current source tree, and it fails at startup with an error
+naming something entirely unrelated to whatever you changed. The reference
+deployment needs:
+
+```
+make build TAGS="bindata sqlite sqlite_unlock_notify"
+```
+
+Record the tags the running binary reports (`<binary> --version`) **before**
+you replace it, and confirm the replacement reports the same. A build system
+may also skip rebuilding entirely when the output already exists and it
+believes nothing changed - delete the artifact to force a real build rather
+than trusting a fast, silent "success".
+
 Do **not** have the desktop app manage the forge's lifecycle. Provisioning is a
 one-time, consent-gated CLI operation. The app only ever observes.
 

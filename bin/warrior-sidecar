@@ -31,11 +31,32 @@ Any name works, but three carry a starter template and a stated purpose:
   tmp      work in progress that is real but not commit-ready. Dean's own
            standing rule is "never delete tmp/ - it holds work in progress";
            a sidecar repo makes that rule enforceable instead of just true
-  wiki     free-form documentation, matching the GitHub/Gitea wiki-repo
-           convention directly - `<project>` gets a `<project>-wiki` sibling
+  wiki     free-form documentation, echoing the GitHub/Gitea wiki-repo
+           convention - `<project>` gets a `<project>-wiki` sibling
 
 A category name that isn't one of these three still works; it just starts
 from a blank README instead of a template, and the tool says so.
+
+The separator is load-bearing: DASH, never DOT
+------------------------------------------------
+Sidecar repositories are named `<project>-<category>` (a dash), NOT
+`<project>.<category>` (a dot). That looks like a cosmetic choice and is
+not. A forge's own native units - GitHub's and Gitea's wiki, and any
+custom unit a self-hosted forge adds - own `<repo>.<unit>.git` as their
+private storage path. Naming a sidecar with a dot puts an ordinary,
+registered repository on the exact path a native unit expects to own
+invisibly: one directory, two meanings.
+
+The failure is ugly and its message points nowhere useful. Pushes to that
+path get rejected by the forge's pre-receive hook with an opaque
+"Internal Server Connection Error", because the hook resolves the path to
+the registered repo while the push environment names the parent - a
+mismatch it has no vocabulary for. Recovering means renaming one of them
+out of the way.
+
+This was hit for real on a live Gitea instance (2026-08-15) by a separate
+tool that used dots. Do not "improve" the naming here to match the wiki
+convention more literally.
 
 What this tool does NOT do
 ----------------------------
