@@ -16,3 +16,5 @@ venv/
 # a report generated against someone's estate.
 *-report.json
 *-report.txt
+# warrior-sidecar: versioned separately, see goals/README.md
+/goals/

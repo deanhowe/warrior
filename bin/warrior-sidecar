@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""warrior-sidecar — a named, versioned space beside a project that the
+project's own history never sees.
+
+Why this exists
+----------------
+Some things belong near a project but not IN its history: planning notes
+that would just be noise in the commit log, financial or credential-adjacent
+material that should never touch a shared remote, scratch work that isn't
+finished enough to commit but is too valuable to lose if the machine dies.
+The usual answer is "put it in a gitignored directory" - which protects it
+from the project's own history, but leaves it with NO protection at all:
+not committed, not mirrored, not recoverable if the disk fails. That is
+exactly the invisible-work problem this whole toolkit exists to fix,
+recreated one layer up.
+
+A sidecar is the fix: a directory beside the project, excluded from the
+project's own `.gitignore`, but which is ITSELF a real git repository with
+its own history and its own home on your forge - the same relationship a
+wiki repository has to its parent on GitHub or Gitea. The project's commits
+never mention it. Its own commits are exactly as protected as anything else
+`warrior-protect` looks after, because that is the same tool used to push it.
+
+Well-known categories
+----------------------
+Any name works, but three carry a starter template and a stated purpose:
+
+  goals    planning, decisions, and the "why" behind changes - the place
+           warrior-scan's own findings should land as durable notes instead
+           of evaporating at the end of a terminal session
+  tmp      work in progress that is real but not commit-ready. Dean's own
+           standing rule is "never delete tmp/ - it holds work in progress";
+           a sidecar repo makes that rule enforceable instead of just true
+  wiki     free-form documentation, matching the GitHub/Gitea wiki-repo
+           convention directly - `<project>` gets a `<project>-wiki` sibling
+
+A category name that isn't one of these three still works; it just starts
+from a blank README instead of a template, and the tool says so.
+
+What this tool does NOT do
+----------------------------
+It does not push anything. Server wiring, verified-by-refs pushing, and the
+pull-mirror refusal all already exist in `warrior-protect`, which accepts
+any repository path - including a sidecar's. Duplicating that logic here
+would be the exact kind of thing this project's own NOTICES warn against:
+two implementations of one safety-critical path drifting apart. Scaffold
+here, then:
+
+    python3 bin/warrior-protect <project>/<category> --apply
+
+Safety
+------
+Dry run by default. `--apply` is required to write anything. Refuses to
+overwrite an existing directory of the same name. The `.gitignore` edit is
+two precise lines (a comment explaining why, then the exact pattern on its
+own line - a .gitignore comment is only a comment as the first character of
+a line, so the two cannot share one line), appended - never a wildcard,
+never touching lines that already exist.
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+_LIB = Path(__file__).resolve().parent.parent / "lib"
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+from warrior_forge import git  # noqa: E402 - the shared READ-ONLY chokepoint,
+# used here only for inspection (rev-list, remote). It deliberately does not
+# allow init/add/commit - that allowlist is what every other tool's safety
+# guarantee rests on, so this tool does not loosen it for its own convenience.
+
+
+def _local_git_write(repo: Path, *args: str) -> tuple[int, str, str]:
+    """The ONE place in this tool that can mutate git state, and it can only
+    ever do three things: init a brand-new repository, stage a file this
+    tool just wrote itself, and commit. Never touches an existing repository
+    - `execute()` below only calls this after confirming the target
+    directory does not exist yet.
+    """
+    allowed = {"init", "add", "commit"}
+    if args[0] not in allowed:
+        raise RuntimeError(f"refusing git '{args[0]}' - only {allowed} permitted here")
+    # -c identity flags so `commit` succeeds even on a machine with no global
+    # git user.name/user.email configured - a fresh clone of this project on
+    # someone else's machine must not fail its first real write for a reason
+    # that has nothing to do with this tool.
+    process = subprocess.run(
+        ["git", "--no-optional-locks",
+         "-c", "user.name=warrior-sidecar", "-c", "user.email=sidecar@localhost",
+         "-C", str(repo), *args],
+        capture_output=True, text=True, check=False,
+        stdin=subprocess.DEVNULL, timeout=30,
+    )
+    return process.returncode, process.stdout.strip(), process.stderr.strip()
+
+TEMPLATES: dict[str, tuple[str, str]] = {
+    "goals": (
+        "Goals",
+        "Planning, decisions, and the reasoning behind changes to this "
+        "project.\n\nThis repository is never mentioned by the project's own "
+        "commit history. It exists so \"why did we do this\" has a durable, "
+        "versioned home that isn't noise in the real changelog.\n\n"
+        "Findings from `warrior-scan` on this project belong here as dated "
+        "notes, not just terminal output that vanishes at the end of a "
+        "session.\n",
+    ),
+    "tmp": (
+        "Scratch",
+        "Work in progress that is real but not commit-ready.\n\n"
+        "The standing rule for a `tmp/` directory is: never delete it, it "
+        "holds work in progress. A sidecar repository makes that rule "
+        "enforceable — this content is versioned and pushable exactly like "
+        "anything else, so \"in progress\" stops meaning \"unprotected\".\n",
+    ),
+    "wiki": (
+        "Wiki",
+        "Free-form documentation for this project.\n\n"
+        "Named to match the GitHub/Gitea convention directly: a `<project>` "
+        "repository gets a `<project>-wiki` sibling that holds the "
+        "documentation a commit history was never meant to carry.\n",
+    ),
+}
+
+GITIGNORE_MARKER = "# warrior-sidecar:"
+
+
+def category_purpose(category: str) -> tuple[str, str]:
+    if category in TEMPLATES:
+        return TEMPLATES[category]
+    return category.title(), f"Sidecar content for this project, category '{category}'.\n"
+
+
+def gitignore_block(category: str) -> str:
+    # A .gitignore comment must be the FIRST character of its own line - an
+    # inline "pattern  # comment" is not comment syntax at all, it becomes
+    # part of the literal pattern and matches nothing. Caught live: the
+    # first real test left goals/ showing as untracked despite this "being
+    # in .gitignore". Two lines, comment first, pattern on its own line.
+    return (f"{GITIGNORE_MARKER} versioned separately, see {category}/README.md\n"
+           f"/{category}/")
+
+
+def inspect(project: Path, category: str) -> dict[str, Any]:
+    sidecar = project / category
+    gitignore = project / ".gitignore"
+    record: dict[str, Any] = {
+        "project": str(project),
+        "category": category,
+        "sidecar_path": str(sidecar),
+        "sidecar_exists": sidecar.exists(),
+        "sidecar_is_git_repo": (sidecar / ".git").exists() if sidecar.exists() else False,
+        "gitignore_entry_present": False,
+    }
+    if gitignore.exists():
+        text = gitignore.read_text()
+        # Checked as two independent substrings, not the exact block text -
+        # a human may reformat spacing around either line, and that should
+        # still count as "present", not trigger a duplicate entry.
+        record["gitignore_entry_present"] = f"/{category}/" in text
+    return record
+
+
+def list_existing_sidecars(project: Path) -> list[dict[str, Any]]:
+    found = []
+    for child in sorted(project.iterdir()):
+        if not child.is_dir() or not (child / ".git").exists():
+            continue
+        gitignore = project / ".gitignore"
+        ignored = gitignore.exists() and f"/{child.name}/" in gitignore.read_text()
+        if ignored:
+            code, out, _ = git(child, "rev-list", "--count", "HEAD")
+            code2, remotes, _ = git(child, "remote")
+            found.append({
+                "category": child.name,
+                "commits": int(out) if code == 0 and out.isdigit() else 0,
+                "remotes": remotes.split() if remotes else [],
+            })
+    return found
+
+
+def plan(project: Path, category: str) -> dict[str, Any]:
+    record = inspect(project, category)
+    if record["sidecar_exists"] and record["sidecar_is_git_repo"]:
+        record["action"] = "skip"
+        record["reason"] = "already exists and is already a git repository"
+    elif record["sidecar_exists"] and not record["sidecar_is_git_repo"]:
+        record["action"] = "refuse"
+        record["reason"] = (f"{record['sidecar_path']} already exists and is not a git "
+                            "repository - not overwriting it")
+    else:
+        record["action"] = "create"
+        record["reason"] = f"create {category}/, gitignore it in the parent, init and commit"
+    return record
+
+
+def execute(record: dict[str, Any]) -> dict[str, Any]:
+    project = Path(record["project"])
+    category = record["category"]
+    sidecar = Path(record["sidecar_path"])
+
+    sidecar.mkdir(parents=True, exist_ok=False)
+
+    title, body = category_purpose(category)
+    (sidecar / "README.md").write_text(f"# {title}\n\n{body}")
+
+    gitignore = project / ".gitignore"
+    if not record["gitignore_entry_present"]:
+        block = gitignore_block(category)
+        existing = gitignore.read_text() if gitignore.exists() else ""
+        separator = "" if existing.endswith("\n") or not existing else "\n"
+        gitignore.write_text(f"{existing}{separator}{block}\n")
+        record["gitignore_updated"] = True
+    else:
+        record["gitignore_updated"] = False
+
+    code, _, err = _local_git_write(sidecar, "init")
+    if code != 0:
+        record["result"] = f"FAILED to init: {err[:160]}"
+        return record
+
+    code, _, err = _local_git_write(sidecar, "add", "README.md")
+    if code != 0:
+        record["result"] = f"FAILED to stage: {err[:160]}"
+        return record
+
+    code, _, err = _local_git_write(sidecar, "commit", "-m",
+                                    f"chore: initial {category} sidecar")
+    if code != 0:
+        record["result"] = f"FAILED to commit: {err[:160]}"
+        return record
+
+    record["result"] = (
+        f"created {sidecar} as its own git repository. "
+        f"Push it with: python3 bin/warrior-protect {sidecar} --apply"
+    )
+    return record
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    list_parser = subparsers.add_parser("list", help="show sidecars a project already has")
+    list_parser.add_argument("project", type=Path)
+
+    init_parser = subparsers.add_parser("init", help="scaffold a new sidecar")
+    init_parser.add_argument("project", type=Path)
+    init_parser.add_argument("category", help="e.g. goals, tmp, wiki, or any name")
+    init_parser.add_argument("--apply", action="store_true",
+                             help="actually create it (default is a dry-run plan)")
+
+    arguments = parser.parse_args()
+    project = arguments.project.expanduser().resolve()
+
+    if not project.is_dir():
+        print(f"warrior-sidecar: not a directory: {project}", file=sys.stderr)
+        return 2
+
+    if arguments.command == "list":
+        sidecars = list_existing_sidecars(project)
+        if not sidecars:
+            print(f"No sidecars found under {project}.")
+            print("A sidecar is a gitignored subdirectory that is itself a git repository.")
+            return 0
+        print(f"Sidecars under {project}:")
+        for entry in sidecars:
+            remotes = ", ".join(entry["remotes"]) if entry["remotes"] else "no remote"
+            print(f"  {entry['category']:<12} {entry['commits']} commits, {remotes}")
+        return 0
+
+    # init
+    category = arguments.category
+    record = plan(project, category)
+    print(f"{record['sidecar_path']}")
+    print(f"  action  {record['action'].upper()} — {record['reason']}")
+
+    if record["action"] != "create":
+        return 0 if record["action"] == "skip" else 2
+
+    if not arguments.apply:
+        title, _ = category_purpose(category)
+        known = " (has a starter template)" if category in TEMPLATES else " (blank README)"
+        print(f"  would write {category}/README.md ('{title}'{known})")
+        indented = "\n".join("    " + line for line in gitignore_block(category).splitlines())
+        print(f"  would add to .gitignore:\n{indented}")
+        print("\nDRY RUN — re-run with --apply to actually create it.")
+        return 0
+
+    record = execute(record)
+    print(f"  result  {record['result']}")
+    return 0 if not record["result"].startswith("FAILED") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

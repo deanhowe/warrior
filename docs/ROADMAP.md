@@ -2,7 +2,7 @@
 
 ## Chapter 1 — Know your machine, never lose work (SHIPPED)
 
-Six tools, each read-only or additive, each with real tests:
+Seven tools, each read-only or additive, each with real tests:
 
 - **`warrior-scan`** — read-only work-loss scan: what could be lost right now,
   and where. Eleven vectors, from JetBrains shelves to unreachable commits.
@@ -20,6 +20,11 @@ Six tools, each read-only or additive, each with real tests:
 - **`warrior-server-status`** — is your git forge actually healthy: reachability,
   disk headroom, mirror staleness, backup freshness. "Answers HTTP 200" and
   "wired up correctly" are different claims; this checks the second one.
+- **`warrior-sidecar`** — gives a project a named, versioned space beside it
+  that its own commit history never sees (goals, tmp, wiki), instead of a
+  gitignored directory with zero protection at all. Scaffolds only;
+  `warrior-protect` does the actual pushing, so there's one implementation
+  of verified-by-refs safety, not two drifting apart.
 
 This chapter is real. It has been run against 415 repositories on a live
 machine, adversarially audited for safety and portability, and used to
