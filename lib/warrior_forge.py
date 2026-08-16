@@ -347,15 +347,22 @@ def sanitise_repo_name(name: str) -> str:
 
 
 def flatten_path(path: str | Path, root: str | Path | None) -> str:
-    """Flatten a path under `root` into a single name: lowercased, '/' and '.'
-    collapsed to '-'. Returns '' when the path is not under root."""
+    """Flatten a path under `root` into a single name: case preserved, '/' and
+    '.' collapsed to '-'. Returns '' when the path is not under root.
+
+    Case is preserved on purpose (changed 2026-08-16) to match the naming
+    convention already live in production - 234 real repositories created by
+    an earlier process keep original case (e.g. `...-MeiliSearch`, not
+    `...-meilisearch`). Lowercasing here would make every future repo this
+    tool creates inconsistent with everything that already exists.
+    """
     if root is None:
         return ""
     try:
         relative = Path(path).relative_to(Path(root))
     except ValueError:
         return ""
-    return str(relative).lower().replace("/", "-").replace(".", "-")
+    return str(relative).replace("/", "-").replace(".", "-")
 
 
 def repo_name_for(repo: str | Path, root: str | Path | None = None) -> str:
@@ -374,10 +381,10 @@ def repo_name_for(repo: str | Path, root: str | Path | None = None) -> str:
         if resolved_root is not None:
             flattened = flatten_path(resolved, resolved_root)
     if not flattened or flattened in RESERVED_NAMES:
-        flattened = resolved.name.lower().replace(".", "-")
+        flattened = resolved.name.replace(".", "-")
     name = sanitise_repo_name(flattened)
     if name == "repository":
-        name = sanitise_repo_name(resolved.name.lower().replace(".", "-"))
+        name = sanitise_repo_name(resolved.name.replace(".", "-"))
     return name
 
 
