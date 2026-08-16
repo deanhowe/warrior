@@ -155,3 +155,48 @@ Anything that touches Git gets adversarially verified — tested by someone
 trying to make it fail, not by someone confirming it works. There is no
 exception for tools whose purpose is safety, and there is no exception for
 small changes.
+
+## Verify remote identity by root commit, never by name
+
+A remote's name, and the name of the repo it points at, are both just
+strings someone typed — a prior tool, an earlier session, a copy-paste. They
+can be wrong and still look completely plausible. The only fact that can't
+be faked is shared history.
+
+Before trusting a `moof`/origin-equivalent remote you didn't just set
+yourself — and *always* before pointing it at something new — verify by
+root commit, not name:
+
+```
+git rev-list --max-parents=0 HEAD                       # this repo's root
+git fetch <candidate-url> <branch>                       # do NOT set the
+git rev-list --max-parents=0 FETCH_HEAD                  # remote yet
+```
+
+Exact match on the root commit hash is real, shared history — proof, not a
+guess. Only then `git remote set-url`, and verify the *actual configured
+remote* connects too (`git fetch <remote-name> -v`), not just the one-off
+URL used to check identity.
+
+This caught a real bug directly (2026-08-16): an earlier remote-wiring pass,
+run against a project containing dozens of nested `.git` directories
+(vendored reference clones), set that project's *own* top-level remote to
+the identity of one of the *nested* repos instead. The name looked
+plausible enough that it went unnoticed until the mismatch was checked by
+root commit, not by reading the string.
+
+## Never discard uncommitted changes without a clean baseline first
+
+The other half of the same incident: diagnosing what a command did by
+checking `git status` *after* it ran, with no baseline from *before*,
+misattributed pre-existing uncommitted work to the just-run command — and
+`git checkout -- <files>` then discarded it for real. Never staged, so git
+had no copy anywhere; recovery only worked because an IDE's Local History
+happened to still have it, which is luck, not a plan.
+
+`git status` on the exact files in question, *before* running anything —
+every time, not just when something feels risky. `git checkout --
+<files>`/`git restore <files>` are exactly as destructive as `git checkout
+.`/`git restore .` when the target already had real, unstaged changes; there
+is no version of "just this one file" that makes the loss smaller once it's
+gone.

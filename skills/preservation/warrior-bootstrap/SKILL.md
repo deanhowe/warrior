@@ -92,6 +92,11 @@ because it is a single binary, self-hosts trivially, and includes a package
 registry. Forgejo works identically. A hosted server the developer already
 pays for is also fine — skip provisioning and just configure.
 
+"Includes a package registry" is a checkbox, not a working thing — read
+`warrior-registry` before telling a developer their forge now replaces
+public package registries. Every ecosystem has a real, non-obvious failure
+mode that isn't visible until the first publish attempt.
+
 Reference deployment shape:
 
 ```

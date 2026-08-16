@@ -22,6 +22,7 @@
     "./skills/preservation/warrior-bootstrap",
     "./skills/preservation/warrior-worktree",
     "./skills/preservation/warrior-exchange",
+    "./skills/preservation/warrior-registry",
     "./skills/engineering/ask-warrior",
     "./skills/engineering/code-review",
     "./skills/engineering/codebase-design",
