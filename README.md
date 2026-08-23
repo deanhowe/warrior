@@ -74,6 +74,7 @@ Seven tools in `bin/`, all read-only or additive:
 | `warrior-credits` | Live credit/quota balance across every AI harness you run, at zero token cost, without spending a prompt to ask |
 | `warrior-server-status` | Is your git forge actually healthy right now — reachability, disk headroom, mirror staleness, backup freshness — not just whether it answers HTTP 200 |
 | `warrior-sidecar` | Give a project a named, versioned space beside it that its own history never sees — goals, tmp, wiki — instead of a gitignored directory with zero protection |
+| `warrior-knowledge` | Read-only health check for a Git-backed knowledge source: identity, dirt, remote symbolic HEAD, and exact local/remote commit equality; no harness or forge assumptions |
 
 ### macOS 26 native ML tools (companion repo)
 

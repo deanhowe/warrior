@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Read-only health report for a Git-backed AI knowledge source.
+
+This is deliberately forge- and harness-neutral. It verifies authored source;
+it does not enable a native unit, publish, build embeddings, or trust an index.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+_LIB = Path(__file__).resolve().parent.parent / "lib"
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+from warrior_forge import git, parse_ls_remote, redact_url_userinfo  # noqa: E402
+
+
+def remote_default_branch(repo: Path, remote: str) -> tuple[str | None, str | None]:
+    code, output, error = git(repo, "ls-remote", "--symref", remote, "HEAD")
+    if code != 0:
+        return None, error or "remote HEAD lookup failed"
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) == 3 and fields[0] == "ref:" and fields[2] == "HEAD":
+            prefix = "refs/heads/"
+            return (fields[1][len(prefix):] if fields[1].startswith(prefix)
+                    else fields[1]), None
+    return None, "remote does not advertise a symbolic HEAD"
+
+
+def inspect(source: Path, remote: str) -> dict[str, Any]:
+    errors: list[str] = []
+    if not source.is_dir():
+        return {"source": str(source), "healthy": False,
+                "errors": ["knowledge source directory does not exist"]}
+
+    code, inside, error = git(source, "rev-parse", "--is-inside-work-tree")
+    if code != 0 or inside != "true":
+        return {"source": str(source), "healthy": False,
+                "errors": [error or "knowledge source is not a Git working tree"]}
+
+    _, branch, _ = git(source, "branch", "--show-current")
+    _, head, _ = git(source, "rev-parse", "HEAD")
+    _, dirty, _ = git(source, "status", "--porcelain=v1")
+    url_code, remote_url, remote_error = git(source, "remote", "get-url", remote)
+    if url_code != 0:
+        errors.append(remote_error or f"remote {remote!r} is missing")
+        remote_url = ""
+
+    default_branch, default_error = remote_default_branch(source, remote)
+    if default_error:
+        errors.append(default_error)
+
+    remote_head = None
+    if default_branch:
+        code, refs, lookup_error = git(
+            source, "ls-remote", remote, f"refs/heads/{default_branch}")
+        if code != 0:
+            errors.append(lookup_error or "remote default branch lookup failed")
+        else:
+            remote_head = parse_ls_remote(refs).get(f"refs/heads/{default_branch}")
+
+    if not branch:
+        errors.append("knowledge source has detached HEAD")
+    if dirty:
+        errors.append("knowledge source has uncommitted content")
+    if default_branch and branch != default_branch:
+        errors.append("local branch differs from remote symbolic HEAD")
+    if remote_head and head != remote_head:
+        errors.append("local HEAD differs from remote default branch")
+
+    return {
+        "source": str(source),
+        "healthy": not errors,
+        "branch": branch or None,
+        "head": head or None,
+        "dirty_entries": len(dirty.splitlines()) if dirty else 0,
+        "remote": remote,
+        "remote_url": redact_url_userinfo(remote_url),
+        "remote_default_branch": default_branch,
+        "remote_head": remote_head,
+        "errors": errors,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path, help="Git-backed knowledge source")
+    parser.add_argument("--remote", default="origin")
+    parser.add_argument("--json", action="store_true")
+    arguments = parser.parse_args()
+    report = inspect(arguments.source.expanduser().resolve(), arguments.remote)
+    if arguments.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print("Warrior Knowledge: " + ("healthy" if report["healthy"] else "attention required"))
+        for error in report["errors"]:
+            print(f"  - {error}")
+    return 0 if report["healthy"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
