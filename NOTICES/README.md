@@ -25,7 +25,15 @@ compete.
 
 ## Provenance
 
-Imported from mattpocock/skills at commit `8b78b53` (2026-08-13). A full
-local fork is preserved on Moof Git for upstream comparison; this directory
-carries only the promoted skills relevant to this plugin, not the whole
-upstream repo.
+Imported from mattpocock/skills at commit `8b78b53` (2026-08-13). The exact
+source commit is preserved on branch `warrior-import-8b78b53` in both
+`safe/mattpocock-skills` and `moof/mattpocock-skills` on Dean's local Forge.
+`public/mattpocock-skills` is the replaceable pull mirror of the current public
+source; `safe` is the controlled promotion boundary; `moof` is the working
+child. The older `deanhowe/mattpocock-skills` repository remains preserved and
+is not treated as the upstream mirror.
+
+The local reference checkout lives at
+`~/PROJECTS/Moof/software/reference/mattpocock-skills/`, not as a peer product
+beside Warrior. Warrior carries only the promoted skills relevant to this
+plugin, not the whole upstream repository.
