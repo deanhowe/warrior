@@ -63,7 +63,7 @@ marketplace, the same pattern upstream uses. Run
 
 ### Preservation — the layer everything else sits on
 
-Nine tools in `bin/`, all read-only or additive:
+Ten tools in `bin/`, all read-only or additive:
 
 | Tool | What it does |
 |---|---|
@@ -76,6 +76,7 @@ Nine tools in `bin/`, all read-only or additive:
 | `warrior-sidecar` | Give a project a named, versioned space beside it that its own history never sees — goals, tmp, wiki — instead of a gitignored directory with zero protection |
 | `warrior-knowledge` | Read-only health check for a Git-backed knowledge source: identity, dirt, remote symbolic HEAD, and exact local/remote commit equality; no harness or forge assumptions |
 | `warrior-history` | Read-only history doctor: explains large blobs, databases, archives, compiled artifacts, multiple root lineages, and unreachable commits before any rewrite is considered |
+| `warrior-upstream` | Proves a vendored source relationship from a manifest: exact commit, byte-identical files, renames, declared adaptations, omissions, and undeclared drift—without fetching or updating anything |
 
 ### macOS 26 native ML tools (companion repo)
 

@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "name": "Matt Pocock engineering and productivity skills",
+  "source_url": "https://github.com/mattpocock/skills.git",
+  "source_commit": "8b78b531ab965735c5dc74f6f7a219e1e37326df",
+  "vendor_root": "..",
+  "mappings": [
+    {
+      "source": "skills/engineering",
+      "destination": "skills/engineering"
+    },
+    {
+      "source": "skills/productivity",
+      "destination": "skills/productivity"
+    },
+    {
+      "source": "skills/misc/git-guardrails-claude-code",
+      "destination": "skills/misc/git-guardrails-claude-code"
+    }
+  ],
+  "renames": {
+    "skills/engineering/ask-matt/PHASE-BOUNDARIES.md": "skills/engineering/ask-warrior/PHASE-BOUNDARIES.md",
+    "skills/engineering/ask-matt/SKILL.md": "skills/engineering/ask-warrior/SKILL.md",
+    "skills/engineering/ask-matt/agents/openai.yaml": "skills/engineering/ask-warrior/agents/openai.yaml",
+    "skills/engineering/setup-matt-pocock-skills/SKILL.md": "skills/engineering/setup-engineering-skills/SKILL.md",
+    "skills/engineering/setup-matt-pocock-skills/agents/openai.yaml": "skills/engineering/setup-engineering-skills/agents/openai.yaml",
+    "skills/engineering/setup-matt-pocock-skills/domain.md": "skills/engineering/setup-engineering-skills/domain.md",
+    "skills/engineering/setup-matt-pocock-skills/issue-tracker-github.md": "skills/engineering/setup-engineering-skills/issue-tracker-github.md",
+    "skills/engineering/setup-matt-pocock-skills/issue-tracker-gitlab.md": "skills/engineering/setup-engineering-skills/issue-tracker-gitlab.md",
+    "skills/engineering/setup-matt-pocock-skills/issue-tracker-local.md": "skills/engineering/setup-engineering-skills/issue-tracker-local.md",
+    "skills/engineering/setup-matt-pocock-skills/triage-labels.md": "skills/engineering/setup-engineering-skills/triage-labels.md"
+  },
+  "expected_divergences": {
+    "skills/engineering/README.md": "Use Warrior's harness-neutral skill names and grouping.",
+    "skills/engineering/ask-warrior/SKILL.md": "Rename the upstream ask-matt router for Warrior.",
+    "skills/engineering/code-review/SKILL.md": "Point internal references at Warrior's renamed setup skill.",
+    "skills/engineering/setup-engineering-skills/SKILL.md": "Make setup product-neutral and add Gitea as a supported issue tracker.",
+    "skills/engineering/to-spec/SKILL.md": "Point setup guidance at Warrior's renamed skill.",
+    "skills/engineering/to-tickets/SKILL.md": "Point setup guidance at Warrior's renamed skill.",
+    "skills/engineering/triage/SKILL.md": "Point setup guidance at Warrior's renamed skill.",
+    "skills/engineering/wayfinder/SKILL.md": "Point setup guidance at Warrior's renamed skill.",
+    "skills/misc/git-guardrails-claude-code/scripts/block-dangerous-git.sh": "Also block destructive checkout and restore path forms encountered in production use."
+  },
+  "expected_extras": {
+    "skills/engineering/setup-engineering-skills/issue-tracker-gitea.md": "Warrior supports a self-hosted Gitea or Forgejo issue tracker."
+  }
+}

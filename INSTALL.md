@@ -17,13 +17,23 @@ python3 bin/warrior-scan --help
 python3 bin/warrior-facts --help
 python3 bin/warrior-credits --help
 python3 bin/warrior-history --help
+python3 bin/warrior-upstream --help
 ```
 
-`warrior-scan`, `warrior-facts`, and `warrior-credits` need **no
+`warrior-scan`, `warrior-facts`, `warrior-history`, and `warrior-credits` need **no
 configuration at all**. Point `warrior-scan` at a directory and it works:
 
 ```bash
 python3 bin/warrior-scan ~/code
+```
+
+`warrior-upstream` is also network-free. It needs an explicit provenance
+manifest and a local checkout of the source commit to compare:
+
+```bash
+python3 bin/warrior-upstream audit \
+  --manifest upstreams/mattpocock-skills.json \
+  --source /path/to/mattpocock-skills
 ```
 
 ## If you want repo protection and classification

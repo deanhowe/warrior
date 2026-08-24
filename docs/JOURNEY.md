@@ -131,6 +131,30 @@ for leaked secrets, build a rewritten clone, move refs, run garbage collection,
 or alter a remote. Those are separate future capabilities because combining
 "tell me what happened" with "rewrite it now" is not a safe interface.
 
+## Chapter 2¾ — Know what came from upstream
+
+Before leaving history work, one adjacent problem deserves its own boundary:
+vendored source. A copied directory is easy to mistake for either wholly
+upstream or wholly yours after a few months of edits.
+
+```bash
+python3 bin/warrior-upstream audit \
+  --manifest upstreams/mattpocock-skills.json \
+  --source /path/to/source-checkout
+```
+
+The manifest pins the source commit and declares selected trees, renames,
+intentional divergences, and local-only files. The audit hashes both sides and
+fails on a dirty source checkout, the wrong source commit, a missing file, an
+undeclared edit, an undeclared extra, or a declaration that has gone stale. It
+reads file bytes only to hash them and never prints their contents.
+
+This is deliberately not an updater. It does not contact a remote, fetch,
+merge, overwrite the vendored copy, or decide that a newer upstream version is
+better. Updating a transformed import requires human review of both the new
+source and the declared local intent; turning that into one automatic command
+would erase the boundary this tool exists to make visible.
+
 ## Chapter 3 — Know your estate
 
 ```bash

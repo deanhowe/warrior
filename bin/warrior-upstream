@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Audit a vendored source tree against an explicit provenance manifest.
+
+The command is intentionally read-only. It does not fetch, checkout, update,
+stage, or rewrite either tree. File contents are hashed and never printed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any, Iterable
+
+
+KINDS = (
+    "declared_divergence",
+    "expected_extra",
+    "identical",
+    "missing",
+    "stale_declaration",
+    "unexpected_difference",
+    "unexpected_extra",
+)
+
+
+class AuditError(Exception):
+    pass
+
+
+def safe_relative(value: str, field: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or not value or ".." in path.parts:
+        raise AuditError(f"{field} must be a non-empty relative path: {value!r}")
+    return path
+
+
+def git_read(source: Path, *args: str) -> str:
+    allowed = {("rev-parse", "HEAD"), ("status", "--porcelain=v1", "--untracked-files=all")}
+    if args not in allowed:
+        raise AuditError(f"refusing unapproved Git form: git {' '.join(args)}")
+    environment = dict(os.environ)
+    environment.setdefault("GIT_TERMINAL_PROMPT", "0")
+    try:
+        result = subprocess.run(
+            [
+                "git", "--no-optional-locks", "-c", "core.fsmonitor=", "-C",
+                str(source), *args,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AuditError(f"cannot inspect source Git identity: {error}") from error
+    if result.returncode != 0:
+        raise AuditError("source is not a readable Git checkout with a HEAD commit")
+    return result.stdout.strip()
+
+
+def digest(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def files_below(root: Path) -> Iterable[Path]:
+    if not root.is_dir():
+        return ()
+    return (path for path in sorted(root.rglob("*")) if path.is_file() and not path.is_symlink())
+
+
+def load_manifest(path: Path) -> dict[str, Any]:
+    try:
+        manifest = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise AuditError(f"cannot read manifest: {error}") from error
+    if manifest.get("schema_version") != 1:
+        raise AuditError("unsupported or missing manifest schema_version")
+    for field in ("name", "source_url", "source_commit", "vendor_root", "mappings"):
+        if field not in manifest:
+            raise AuditError(f"manifest is missing {field}")
+    if not isinstance(manifest["mappings"], list) or not manifest["mappings"]:
+        raise AuditError("manifest mappings must be a non-empty list")
+    return manifest
+
+
+def audit(manifest_path: Path, source: Path) -> dict[str, Any]:
+    manifest = load_manifest(manifest_path)
+    vendor = Path(manifest["vendor_root"]).expanduser()
+    if not vendor.is_absolute():
+        vendor = manifest_path.parent / vendor
+    source = source.expanduser()
+    actual_commit = git_read(source, "rev-parse", "HEAD")
+    source_clean = not git_read(source, "status", "--porcelain=v1", "--untracked-files=all")
+    expected_commit = str(manifest["source_commit"])
+
+    renames = {
+        safe_relative(key, "rename source").as_posix():
+        safe_relative(value, "rename destination").as_posix()
+        for key, value in manifest.get("renames", {}).items()
+    }
+    divergences = {
+        safe_relative(key, "expected divergence").as_posix(): str(value)
+        for key, value in manifest.get("expected_divergences", {}).items()
+    }
+    extras = {
+        safe_relative(key, "expected extra").as_posix(): str(value)
+        for key, value in manifest.get("expected_extras", {}).items()
+    }
+
+    findings: list[dict[str, str]] = []
+    expected_destinations: set[str] = set()
+    destination_roots: list[Path] = []
+
+    for mapping in manifest["mappings"]:
+        source_prefix = safe_relative(str(mapping["source"]), "mapping source")
+        destination_prefix = safe_relative(str(mapping["destination"]), "mapping destination")
+        destination_roots.append(destination_prefix)
+        source_root = source / source_prefix
+        if not source_root.is_dir():
+            findings.append({"kind": "missing", "path": source_prefix.as_posix()})
+            continue
+        for source_file in files_below(source_root):
+            source_relative = source_file.relative_to(source).as_posix()
+            default_destination = (destination_prefix / source_file.relative_to(source_root)).as_posix()
+            destination_relative = renames.get(source_relative, default_destination)
+            expected_destinations.add(destination_relative)
+            destination_file = vendor / destination_relative
+            if not destination_file.is_file() or destination_file.is_symlink():
+                findings.append({"kind": "missing", "path": destination_relative})
+            elif digest(source_file) == digest(destination_file):
+                kind = "stale_declaration" if destination_relative in divergences else "identical"
+                findings.append({"kind": kind, "path": destination_relative})
+            else:
+                kind = "declared_divergence" if destination_relative in divergences else "unexpected_difference"
+                findings.append({"kind": kind, "path": destination_relative})
+
+    seen_vendor: set[str] = set()
+    for destination_root in destination_roots:
+        for vendor_file in files_below(vendor / destination_root):
+            relative = vendor_file.relative_to(vendor).as_posix()
+            if relative in seen_vendor or relative in expected_destinations:
+                continue
+            seen_vendor.add(relative)
+            kind = "expected_extra" if relative in extras else "unexpected_extra"
+            findings.append({"kind": kind, "path": relative})
+
+    found_paths = {item["path"] for item in findings}
+    for declared in sorted(set(divergences) | set(extras)):
+        if declared not in found_paths:
+            findings.append({"kind": "stale_declaration", "path": declared})
+
+    findings.sort(key=lambda item: (item["kind"], item["path"]))
+    counted = Counter(item["kind"] for item in findings)
+    counts = {kind: counted[kind] for kind in KINDS}
+    blocking = {"missing", "stale_declaration", "unexpected_difference", "unexpected_extra"}
+    healthy = (
+        actual_commit == expected_commit
+        and source_clean
+        and not any(counts[kind] for kind in blocking)
+    )
+    return {
+        "schema_version": 1,
+        "name": manifest["name"],
+        "source_url": manifest["source_url"],
+        "source_commit_expected": expected_commit,
+        "source_commit_actual": actual_commit,
+        "source_commit_matches": actual_commit == expected_commit,
+        "source_clean": source_clean,
+        "healthy": healthy,
+        "counts": counts,
+        "findings": findings,
+    }
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(description=__doc__)
+    commands = root.add_subparsers(dest="command", required=True)
+    command = commands.add_parser("audit", help="compare a source checkout with a vendored tree")
+    command.add_argument("--manifest", required=True, type=Path)
+    command.add_argument("--source", required=True, type=Path)
+    command.add_argument("--json", action="store_true")
+    return root
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        report = audit(args.manifest, args.source)
+    except AuditError as error:
+        print(f"warrior-upstream: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        status = "healthy" if report["healthy"] else "attention required"
+        print(f"{report['name']}: {status}")
+        print(f"source commit: {report['source_commit_actual']}")
+        for kind in KINDS:
+            print(f"{kind.replace('_', ' ')}: {report['counts'][kind]}")
+    return 0 if report["healthy"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

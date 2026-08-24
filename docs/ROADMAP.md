@@ -2,7 +2,7 @@
 
 ## Chapter 1 — Know your machine, never lose work (SHIPPED)
 
-Nine tools, each read-only or additive, each with real tests:
+Ten tools, each read-only or additive, each with real tests:
 
 - **`warrior-scan`** — read-only work-loss scan: what could be lost right now,
   and where. Eleven vectors, from JetBrains shelves to unreachable commits.
@@ -30,9 +30,13 @@ Nine tools, each read-only or additive, each with real tests:
 - **`warrior-history`** — assesses reachable and unreachable repository
   history without rewriting it: large blobs, database/archive/build artifacts,
   unrelated roots, and commits on Git's expiry clock.
+- **`warrior-upstream`** — verifies a transformed vendored source against an
+  explicit manifest: pinned commit, selected trees, renames, declared
+  divergences, and local extras. It never fetches or updates either tree.
 
 History candidate generation and canonical cutover are deliberately not
-shipped. Assessment is the proven boundary today; rewriting remains roadmap.
+shipped. Upstream refresh/candidate generation is also not shipped. Assessment
+is the proven boundary today; rewriting and updating remain roadmap.
 
 This chapter is real. It has been run against 415 repositories on a live
 machine, adversarially audited for safety and portability, and used to
