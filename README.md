@@ -79,6 +79,11 @@ Eleven tools in `bin/`, all read-only or additive:
 | `warrior-upstream` | Proves a vendored source relationship from a manifest: exact commit, byte-identical files, renames, declared adaptations, omissions, and undeclared drift—without fetching or updating anything |
 | `warrior-project` | Builds a read-only dossier of nested Git boundaries and Composer packages before an import: roots, dirt, sanitized remotes, identity-matched release tags, historical fork identities, blockers, and duplicate package identities |
 
+`hooks/pre-push-preservation` is the matching Git-side guard. It reads the
+actual local and remote ref pairs Git supplies on stdin, allows new and
+fast-forward refs, and blocks branch rewrites, tag replacement and deletion.
+It never tries to infer force from the remote name or URL.
+
 ### Platform
 
 Warrior targets macOS Tahoe 26. It is dogfooded and released for that platform;

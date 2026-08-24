@@ -71,6 +71,17 @@ that must not exist. It never invokes `git-filter-repo` in the source:
 The command does not replace a canonical repository, change a source ref,
 delete a source object, push rewritten history, or force-push anything.
 
+## Pre-push preservation hook
+
+`hooks/pre-push-preservation` blocks deletion, tag replacement and
+non-fast-forward branch updates from Git's four-field pre-push input. It does
+not search `$*` for `-f`: hook arguments contain the remote name and URL, so
+that common pattern falsely blocks ordinary repositories whose names include
+strings such as `-folio` or `-firefox`. The hook has deterministic tests for a
+new ref, fast-forward, rewrite and deletion. Installation is deliberately
+separate from the hook file because replacing an existing local hook requires
+preserving and reviewing what was already there.
+
 ## Adversarial review coverage, stated per tool
 
 Only `warrior-scan` has had the full treatment this contract describes:
