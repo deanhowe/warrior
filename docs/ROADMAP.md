@@ -2,7 +2,7 @@
 
 ## Chapter 1 — Know your machine, never lose work (SHIPPED)
 
-Seven tools, each read-only or additive, each with real tests:
+Nine tools, each read-only or additive, each with real tests:
 
 - **`warrior-scan`** — read-only work-loss scan: what could be lost right now,
   and where. Eleven vectors, from JetBrains shelves to unreachable commits.
@@ -25,6 +25,14 @@ Seven tools, each read-only or additive, each with real tests:
   gitignored directory with zero protection at all. Scaffolds only;
   `warrior-protect` does the actual pushing, so there's one implementation
   of verified-by-refs safety, not two drifting apart.
+- **`warrior-knowledge`** — verifies the authored Git source behind an AI
+  knowledge base without assuming a particular harness, index, or forge.
+- **`warrior-history`** — assesses reachable and unreachable repository
+  history without rewriting it: large blobs, database/archive/build artifacts,
+  unrelated roots, and commits on Git's expiry clock.
+
+History candidate generation and canonical cutover are deliberately not
+shipped. Assessment is the proven boundary today; rewriting remains roadmap.
 
 This chapter is real. It has been run against 415 repositories on a live
 machine, adversarially audited for safety and portability, and used to

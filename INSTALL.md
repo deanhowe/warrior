@@ -16,6 +16,7 @@ That's it — the tools run in place, from `bin/`.
 python3 bin/warrior-scan --help
 python3 bin/warrior-facts --help
 python3 bin/warrior-credits --help
+python3 bin/warrior-history --help
 ```
 
 `warrior-scan`, `warrior-facts`, and `warrior-credits` need **no

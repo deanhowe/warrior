@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""Explain repository-history risks without changing the repository."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Optional
+
+
+ARTIFACT_SUFFIXES = {
+    ".db": "database",
+    ".db3": "database",
+    ".sqlite": "database",
+    ".sqlite3": "database",
+    ".mdb": "database",
+    ".accdb": "database",
+    ".sql": "database-dump",
+    ".dump": "database-dump",
+    ".bak": "database-dump",
+    ".backup": "database-dump",
+    ".zip": "archive",
+    ".7z": "archive",
+    ".rar": "archive",
+    ".tar": "archive",
+    ".tgz": "archive",
+    ".gz": "archive",
+    ".bz2": "archive",
+    ".xz": "archive",
+    ".bundle": "git-bundle",
+    ".jar": "package-archive",
+    ".war": "package-archive",
+    ".apk": "package-archive",
+    ".ipa": "package-archive",
+    ".dmg": "disk-image",
+    ".iso": "disk-image",
+    ".pkg": "installer",
+    ".msi": "installer",
+    ".exe": "compiled-binary",
+    ".dll": "compiled-binary",
+    ".dylib": "compiled-binary",
+    ".so": "compiled-binary",
+    ".mov": "media",
+    ".mp4": "media",
+    ".mkv": "media",
+    ".wav": "media",
+    ".aiff": "media",
+    ".mp3": "media",
+}
+SENSITIVE_PATH_PARTS = {
+    ".aws", ".gnupg", ".ssh", ".tax", "credentials", "keychains", "secrets"
+}
+SENSITIVE_NAME = re.compile(
+    r"(?:^|[._-])(credential|secret|token|password|private[-_]?key|id_rsa|id_ed25519)"
+    r"(?:[._-]|$)|^\.env",
+    re.IGNORECASE,
+)
+SENSITIVE_SUBJECT = re.compile(
+    r"\b(password|passwd|secret|token|credential|api[-_ ]?key|private key)\b",
+    re.IGNORECASE,
+)
+
+
+def assert_read_only(args: tuple[str, ...]) -> None:
+    """Allow only the exact Git forms used by this assessor."""
+    if not args:
+        raise RuntimeError("refusing to invoke Git without a subcommand")
+    command, rest = args[0], args[1:]
+    allowed = {
+        "rev-parse": {
+            ("--is-inside-work-tree",), ("--is-bare-repository",),
+            ("--abbrev-ref", "HEAD"), ("HEAD",),
+        },
+        "ls-files": {("-z",)},
+        "ls-tree": {("-r", "--name-only", "-z", "HEAD")},
+        "rev-list": {
+            ("--objects", "--all"), ("--max-parents=0", "--all"),
+            ("--all", "--count"),
+        },
+        "cat-file": {("--batch-check=%(objectname) %(objecttype) %(objectsize)",)},
+        "fsck": {("--unreachable", "--no-reflogs", "--no-progress")},
+    }
+    if command == "log":
+        valid = (
+            len(rest) == 3
+            and rest[0] == "-1"
+            and rest[1] == "--format=%H%x1f%ci%x1f%s"
+            and re.fullmatch(r"[0-9a-f]{40,64}", rest[2]) is not None
+        )
+        if valid:
+            return
+    if command not in allowed or rest not in allowed[command]:
+        raise RuntimeError(f"refusing unapproved Git form: git {' '.join(args)}")
+
+
+def git(repo: Path, *args: str, input_text: Optional[str] = None) -> tuple[int, str, str]:
+    assert_read_only(args)
+    environment = dict(os.environ)
+    environment.setdefault("GIT_TERMINAL_PROMPT", "0")
+    try:
+        process = subprocess.run(
+            ["git", "--no-optional-locks", "-c", "core.fsmonitor=", "-C", str(repo), *args],
+            input=input_text,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+            timeout=300,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return -1, "", f"{type(error).__name__}: {error}"
+    return process.returncode, process.stdout, process.stderr.strip()
+
+
+def artifact_kind(path: str) -> Optional[str]:
+    name = path.casefold()
+    for suffix, kind in ARTIFACT_SUFFIXES.items():
+        if name.endswith(suffix):
+            return kind
+    return None
+
+
+def sensitive_path(path: str) -> bool:
+    candidate = Path(path)
+    return (
+        any(part.casefold() in SENSITIVE_PATH_PARTS for part in candidate.parts)
+        or SENSITIVE_NAME.search(candidate.name) is not None
+    )
+
+
+def public_path(item: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(item)
+    path = cleaned.pop("_path")
+    if sensitive_path(path):
+        cleaned["path_withheld"] = True
+    else:
+        cleaned["path"] = path
+        cleaned["path_withheld"] = False
+    return cleaned
+
+
+def public_subject(subject: str) -> str:
+    return "[sensitive commit subject withheld]" if SENSITIVE_SUBJECT.search(subject) else subject
+
+
+def object_sizes(repo: Path, object_ids: set[str]) -> dict[str, int]:
+    if not object_ids:
+        return {}
+    payload = "\n".join(sorted(object_ids)) + "\n"
+    code, output, _ = git(
+        repo,
+        "cat-file",
+        "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        input_text=payload,
+    )
+    if code != 0:
+        return {}
+    sizes: dict[str, int] = {}
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) == 3 and fields[1] == "blob" and fields[2].isdigit():
+            sizes[fields[0]] = int(fields[2])
+    return sizes
+
+
+def find_unreachable_commits(repo: Path) -> list[dict[str, str]]:
+    code, output, _ = git(repo, "fsck", "--unreachable", "--no-reflogs", "--no-progress")
+    if code not in {0, 1}:
+        return []
+    commit_ids = [
+        line.split()[-1]
+        for line in output.splitlines()
+        if line.startswith("unreachable commit ")
+    ]
+    commits = []
+    for commit_id in sorted(commit_ids):
+        meta_code, metadata, _ = git(
+            repo, "log", "-1", "--format=%H%x1f%ci%x1f%s", commit_id
+        )
+        if meta_code != 0:
+            continue
+        fields = metadata.strip().split("\x1f", 2)
+        if len(fields) != 3:
+            continue
+        commits.append({
+            "commit": fields[0],
+            "date": fields[1],
+            "subject": public_subject(fields[2]),
+            "disposition": "preserve-and-review",
+            "next_step": "Inspect it and give valuable work a named ref before Git expiry.",
+        })
+    return commits
+
+
+def find_root_commits(repo: Path) -> list[dict[str, str]]:
+    code, output, _ = git(repo, "rev-list", "--max-parents=0", "--all")
+    if code != 0:
+        return []
+    roots = []
+    for commit_id in sorted(output.splitlines()):
+        meta_code, metadata, _ = git(
+            repo, "log", "-1", "--format=%H%x1f%ci%x1f%s", commit_id
+        )
+        if meta_code != 0:
+            continue
+        fields = metadata.strip().split("\x1f", 2)
+        if len(fields) == 3:
+            roots.append({
+                "commit": fields[0], "date": fields[1], "subject": public_subject(fields[2])
+            })
+    return roots
+
+
+def assess(repo: Path, large_bytes: int = 10 * 1024 * 1024) -> dict[str, Any]:
+    code, inside, error = git(repo, "rev-parse", "--is-inside-work-tree")
+    bare_code, bare_output, bare_error = git(repo, "rev-parse", "--is-bare-repository")
+    is_bare = bare_code == 0 and bare_output.strip() == "true"
+    if (code != 0 or inside.strip() != "true") and not is_bare:
+        raise ValueError(error or bare_error or f"not a Git repository: {repo}")
+
+    _, branch, _ = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    _, head, _ = git(repo, "rev-parse", "HEAD")
+    _, commit_count_output, _ = git(repo, "rev-list", "--all", "--count")
+    if is_bare:
+        _, tracked_output, _ = git(repo, "ls-tree", "-r", "--name-only", "-z", "HEAD")
+    else:
+        _, tracked_output, _ = git(repo, "ls-files", "-z")
+    current_paths = {item for item in tracked_output.split("\0") if item}
+    code, objects_output, error = git(repo, "rev-list", "--objects", "--all")
+    if code != 0:
+        raise ValueError(error or "could not enumerate reachable history")
+
+    historical_paths: dict[tuple[str, str], dict[str, str]] = {}
+    candidates: dict[tuple[str, str], dict[str, Any]] = {}
+    object_ids: set[str] = set()
+    for line in objects_output.splitlines():
+        object_id, separator, path = line.partition(" ")
+        if not separator or not path:
+            continue
+        object_ids.add(object_id)
+        historical_paths[(path, object_id)] = {"path": path, "object": object_id}
+        kind = artifact_kind(path)
+        if not kind:
+            continue
+        candidates[(path, object_id)] = {
+            "_path": path,
+            "kind": kind,
+            "presence": "current" if path in current_paths else "history-only",
+            "object": object_id,
+        }
+
+    sizes = object_sizes(repo, object_ids)
+    artifacts = []
+    for item in candidates.values():
+        item["size_bytes"] = sizes.get(item["object"])
+        artifacts.append(public_path(item))
+    artifacts.sort(key=lambda item: (item.get("path", "").casefold(), item["object"]))
+
+    large_blobs = []
+    for item in historical_paths.values():
+        size = sizes.get(item["object"])
+        if size is None or size < large_bytes:
+            continue
+        large_blobs.append(public_path({
+            "_path": item["path"],
+            "object": item["object"],
+            "size_bytes": size,
+            "presence": "current" if item["path"] in current_paths else "history-only",
+        }))
+    large_blobs.sort(key=lambda item: (-item["size_bytes"], item.get("path", "").casefold()))
+    sensitive_paths_withheld = sum(
+        1 for item in artifacts if item.get("path_withheld")
+    )
+    root_commits = find_root_commits(repo)
+    warnings = []
+    if len(root_commits) > 1:
+        warnings.append("multiple unrelated root histories")
+    guidance = []
+    if any(item["presence"] == "history-only" for item in artifacts):
+        guidance.append(
+            "Removing a file in a later commit did not remove its earlier blobs; "
+            "build and verify a separate rewrite candidate before changing any canonical history."
+        )
+    if any(item["presence"] == "current" for item in artifacts):
+        guidance.append(
+            "Current database, archive, media, installer, or binary files may be intentional; "
+            "classify them before proposing Git LFS or a history change."
+        )
+    if large_blobs:
+        guidance.append(
+            "Large blobs affect every clone even when their paths were later removed; "
+            "confirm ownership and provenance before planning a rewrite."
+        )
+    if len(root_commits) > 1:
+        guidance.append(
+            "Identify which refs own each root before combining or rewriting them; "
+            "same repository name does not prove shared identity."
+        )
+    return {
+        "repository": str(repo),
+        "mode": "read-only",
+        "repository_kind": "bare" if is_bare else "working-tree",
+        "branch": branch.strip() or None,
+        "head": head.strip() or None,
+        "reachable_commit_count": (
+            int(commit_count_output.strip()) if commit_count_output.strip().isdigit() else None
+        ),
+        "root_commits": root_commits,
+        "warnings": warnings,
+        "guidance": guidance,
+        "artifacts": artifacts,
+        "large_blob_threshold_bytes": large_bytes,
+        "large_blobs": large_blobs,
+        "sensitive_paths_withheld": sensitive_paths_withheld,
+        "unreachable_commits": find_unreachable_commits(repo),
+        "limits": [
+            "filenames and object sizes are inspected; file contents are never read",
+            "an artifact is a review candidate, not an automatic deletion recommendation",
+        ],
+    }
+
+
+def render(report: dict[str, Any]) -> str:
+    lines = ["Warrior History: read-only assessment", f"repository  {report['repository']}"]
+    lines.append(f"HEAD        {report['branch'] or '(detached)'} {report['head'] or '(unknown)'}")
+    lines.append(
+        f"history     {report['reachable_commit_count']} reachable commit(s), "
+        f"{len(report['root_commits'])} root(s)"
+    )
+    if len(report["root_commits"]) > 1:
+        for root in report["root_commits"]:
+            lines.append(f"  root {root['commit'][:12]}  {root['subject']}")
+    for warning in report["warnings"]:
+        lines.append(f"WARNING     {warning}")
+    if not report["artifacts"]:
+        lines.append("artifacts   none with recognised database/archive/install-image suffixes")
+    else:
+        lines.append(f"artifacts   {len(report['artifacts'])} review candidate(s)")
+        for item in report["artifacts"]:
+            path = item.get("path", "[sensitive path withheld]")
+            lines.append(f"  {item['presence']:12} {item['kind']:10} {path}")
+    lines.append(
+        f"large blobs {len(report['large_blobs'])} at or above "
+        f"{report['large_blob_threshold_bytes']} bytes"
+    )
+    for item in report["large_blobs"]:
+        path = item.get("path", "[sensitive path withheld]")
+        lines.append(f"  {item['presence']:12} {item['size_bytes']:10} B {path}")
+    lines.append(f"unreachable {len(report['unreachable_commits'])} commit(s), preserve and review")
+    for item in report["unreachable_commits"][:12]:
+        lines.append(f"  {item['commit'][:12]}  {item['subject']}")
+    if len(report["unreachable_commits"]) > 12:
+        lines.append(f"  ... {len(report['unreachable_commits']) - 12} more in JSON output")
+    if report["guidance"]:
+        lines.append("guidance")
+        lines.extend(f"  - {item}" for item in report["guidance"])
+    lines.append("Nothing was changed. A reported artifact may be intentional.")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    assess_parser = subparsers.add_parser("assess", help="inspect reachable history")
+    assess_parser.add_argument("repository", type=Path)
+    assess_parser.add_argument("--json", action="store_true")
+    assess_parser.add_argument(
+        "--large-mb", type=float, default=10.0,
+        help="large-blob threshold in MiB (default: 10)",
+    )
+    assess_parser.add_argument("--large-bytes", type=int, help=argparse.SUPPRESS)
+    arguments = parser.parse_args()
+    try:
+        large_bytes = (
+            arguments.large_bytes
+            if arguments.large_bytes is not None
+            else int(arguments.large_mb * 1024 * 1024)
+        )
+        if large_bytes < 0:
+            raise ValueError("the large-blob threshold must be zero or greater")
+        report = assess(arguments.repository.expanduser().resolve(), large_bytes)
+    except ValueError as error:
+        print(f"warrior-history: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps(report, indent=2, sort_keys=True) if arguments.json else render(report))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

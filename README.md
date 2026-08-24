@@ -63,7 +63,7 @@ marketplace, the same pattern upstream uses. Run
 
 ### Preservation — the layer everything else sits on
 
-Seven tools in `bin/`, all read-only or additive:
+Nine tools in `bin/`, all read-only or additive:
 
 | Tool | What it does |
 |---|---|
@@ -75,6 +75,7 @@ Seven tools in `bin/`, all read-only or additive:
 | `warrior-server-status` | Is your git forge actually healthy right now — reachability, disk headroom, mirror staleness, backup freshness — not just whether it answers HTTP 200 |
 | `warrior-sidecar` | Give a project a named, versioned space beside it that its own history never sees — goals, tmp, wiki — instead of a gitignored directory with zero protection |
 | `warrior-knowledge` | Read-only health check for a Git-backed knowledge source: identity, dirt, remote symbolic HEAD, and exact local/remote commit equality; no harness or forge assumptions |
+| `warrior-history` | Read-only history doctor: explains large blobs, databases, archives, compiled artifacts, multiple root lineages, and unreachable commits before any rewrite is considered |
 
 ### macOS 26 native ML tools (companion repo)
 

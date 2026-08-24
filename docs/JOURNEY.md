@@ -90,6 +90,47 @@ None of these recovery commands mutate the original location. That's
 deliberate: recovery should never require you to trust that you got the
 first step right.
 
+## Chapter 2½ — Understand a messy history before doctoring it
+
+```bash
+python3 bin/warrior-history assess ~/code/my-project
+```
+
+This is the history-specific companion to `warrior-scan`. It reads both
+reachable history and unreachable commits, and explains:
+
+- database files and database dumps;
+- zip/tar archives, Git bundles, installers and compiled binaries;
+- media and other blobs above the configurable size threshold;
+- paths that still exist now versus paths found only in older commits;
+- multiple root commits, which can mean unrelated projects or a deliberately
+  preserved pre-rewrite lineage share one object store;
+- commits with no branch or tag protecting them.
+
+A match is a **review candidate**, never a deletion recommendation. A tracked
+SQLite database may be the product. A large video may be the source asset. A
+second root may be an intentional backup branch. The report tells you what is
+true; it does not decide what you meant.
+
+For machine-readable output:
+
+```bash
+python3 bin/warrior-history assess ~/code/my-project --json
+```
+
+The default large-blob threshold is 10 MiB. Override it when a repository has
+a deliberately different policy:
+
+```bash
+python3 bin/warrior-history assess ~/code/my-project --large-mb 50
+```
+
+Sensitive-looking paths and commit subjects are counted but withheld from both
+text and JSON reports. File contents are never read. This command does not scan file content
+for leaked secrets, build a rewritten clone, move refs, run garbage collection,
+or alter a remote. Those are separate future capabilities because combining
+"tell me what happened" with "rewrite it now" is not a safe interface.
+
 ## Chapter 3 — Know your estate
 
 ```bash
