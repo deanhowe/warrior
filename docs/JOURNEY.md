@@ -37,7 +37,7 @@ near it and which aren't. That's the whole trick.
 ## Chapter 1 — See what git hides from you
 
 ```bash
-python3 bin/warrior-scan ~/code
+warrior-scan ~/code
 ```
 
 This reads. It never writes, stages, commits, stashes, or deletes anything —
@@ -93,7 +93,7 @@ first step right.
 ## Chapter 2½ — Understand a messy history before doctoring it
 
 ```bash
-python3 bin/warrior-history assess ~/code/my-project
+warrior-history assess ~/code/my-project
 ```
 
 This is the history-specific companion to `warrior-scan`. It reads both
@@ -115,14 +115,14 @@ true; it does not decide what you meant.
 For machine-readable output:
 
 ```bash
-python3 bin/warrior-history assess ~/code/my-project --json
+warrior-history assess ~/code/my-project --json
 ```
 
 The default large-blob threshold is 10 MiB. Override it when a repository has
 a deliberately different policy:
 
 ```bash
-python3 bin/warrior-history assess ~/code/my-project --large-mb 50
+warrior-history assess ~/code/my-project --large-mb 50
 ```
 
 Sensitive-looking paths and commit subjects are counted but withheld from both
@@ -135,7 +135,7 @@ alter a remote.
 Assessment and rewriting remain separate commands. First write a pinned plan:
 
 ```bash
-python3 bin/warrior-history plan ~/code/my-project \
+warrior-history plan ~/code/my-project \
   --remove-path old-export.zip \
   --output ~/Desktop/my-project-rewrite-plan.json
 ```
@@ -145,7 +145,7 @@ the output file must not already exist. Review the JSON, then build a new bare
 candidate at a path that does not exist:
 
 ```bash
-python3 bin/warrior-history build-candidate \
+warrior-history build-candidate \
   --plan ~/Desktop/my-project-rewrite-plan.json \
   --destination ~/Desktop/my-project-rewritten.git
 ```
@@ -168,7 +168,7 @@ vendored source. A copied directory is easy to mistake for either wholly
 upstream or wholly yours after a few months of edits.
 
 ```bash
-python3 bin/warrior-upstream audit \
+warrior-upstream audit \
   --manifest upstreams/mattpocock-skills.json \
   --source /path/to/source-checkout
 ```
@@ -193,9 +193,9 @@ base and every resulting local divergence.
 ## Chapter 3 — Know your estate
 
 ```bash
-python3 bin/warrior-facts where <name>
-python3 bin/warrior-facts repos --root ~/code
-python3 bin/warrior-facts unprotected --root ~/code
+warrior-facts where <name>
+warrior-facts repos --root ~/code
+warrior-facts unprotected --root ~/code
 ```
 
 This answers the questions you'd otherwise answer by remembering, or by
@@ -206,8 +206,8 @@ in depth, and never follows a symlink outside the root you gave it.
 ## Chapter 4 — Give every repo a home
 
 ```bash
-python3 bin/warrior-protect ~/code/some-old-project
-python3 bin/warrior-protect ~/code/some-old-project --apply
+warrior-protect ~/code/some-old-project
+warrior-protect ~/code/some-old-project --apply
 ```
 
 Dry run first, always — that's the default, not a flag you have to remember.
@@ -223,8 +223,8 @@ check.
 ## Chapter 5 — Name what things are for
 
 ```bash
-python3 bin/warrior-classify
-python3 bin/warrior-classify --apply-topics
+warrior-classify
+warrior-classify --apply-topics
 ```
 
 Not every repository on your server is the same *kind* of thing. Some are

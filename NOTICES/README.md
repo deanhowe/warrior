@@ -36,7 +36,7 @@ checkout of that source commit, this relationship can be verified without
 network access or mutation:
 
 ```bash
-python3 bin/warrior-upstream audit \
+warrior-upstream audit \
   --manifest upstreams/mattpocock-skills.json \
   --source /path/to/mattpocock-skills
 ```

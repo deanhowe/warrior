@@ -36,7 +36,7 @@ Read-only, no configuration required, no network access:
 ```bash
 git clone <this-repo>
 cd warrior
-python3 bin/warrior-scan ~/code
+warrior-scan ~/code
 ```
 
 It prints what it found, ranked by how bad it would be to lose:

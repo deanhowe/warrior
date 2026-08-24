@@ -14,30 +14,38 @@ cd warrior
 chmod +x bin/*
 ```
 
-That's it — the tools run in place, from `bin/`.
+Add the checkout's `bin` directory to the macOS login-shell path. For the
+standard Warrior checkout on this machine, add this line to `~/.zprofile`:
+
+```bash
+export PATH="$HOME/PROJECTS/warrior/bin:$PATH"
+```
+
+Use the real checkout path if Warrior lives elsewhere, then start a new login
+shell (`exec zsh -l`). The commands no longer need a `python3 bin/` prefix.
 
 ## Try it
 
 ```bash
-python3 bin/warrior-scan --help
-python3 bin/warrior-facts --help
-python3 bin/warrior-credits --help
-python3 bin/warrior-history --help
-python3 bin/warrior-upstream --help
+warrior-scan --help
+warrior-facts --help
+warrior-credits --help
+warrior-history --help
+warrior-upstream --help
 ```
 
 `warrior-scan`, `warrior-facts`, `warrior-history`, and `warrior-credits` need **no
 configuration at all**. Point `warrior-scan` at a directory and it works:
 
 ```bash
-python3 bin/warrior-scan ~/code
+warrior-scan ~/code
 ```
 
 `warrior-upstream` is also network-free. It needs an explicit provenance
 manifest and a local checkout of the source commit to compare:
 
 ```bash
-python3 bin/warrior-upstream audit \
+warrior-upstream audit \
   --manifest upstreams/mattpocock-skills.json \
   --source /path/to/mattpocock-skills
 ```

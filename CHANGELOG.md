@@ -9,6 +9,7 @@ All notable Warrior releases are recorded here.
   destinations, remove candidate remotes, run full object verification, and
   prove requested paths are absent without changing the source.
 - State macOS Tahoe 26 as Warrior's sole supported platform.
+- Document direct CLI invocation through Warrior's `bin` directory on `PATH`.
 
 ## 0.1.0 — 2026-08-24
 
