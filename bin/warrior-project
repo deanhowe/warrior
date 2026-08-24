@@ -106,13 +106,28 @@ def composer_record(repo: Path) -> dict[str, Any] | None:
     if not manifest_path.is_file():
         return None
     try:
-        manifest = json.loads(manifest_path.read_text())
-    except (OSError, ValueError) as error:
+        working_manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        working_manifest = None
+    committed_raw = git_value(repo, "cat-file", "blob", "HEAD:composer.json")
+    if not committed_raw:
         return {
             "valid_json": False,
             "publishable": False,
-            "blockers": ["invalid-composer-json"],
+            "blockers": ["no-committed-composer-manifest"],
+            "working_tree": working_manifest,
+            "working_tree_differs_from_head": True,
+        }
+    try:
+        manifest = json.loads(committed_raw)
+    except ValueError as error:
+        return {
+            "valid_json": False,
+            "publishable": False,
+            "blockers": ["invalid-committed-composer-json"],
             "error": str(error),
+            "working_tree": working_manifest,
+            "working_tree_differs_from_head": True,
         }
     if not isinstance(manifest, dict):
         return {
@@ -124,6 +139,13 @@ def composer_record(repo: Path) -> dict[str, Any] | None:
     name = manifest.get("name") if isinstance(manifest.get("name"), str) else ""
     package_type = manifest.get("type") if isinstance(manifest.get("type"), str) else "library"
     declared = manifest.get("version") if isinstance(manifest.get("version"), str) else ""
+    working_tree = None
+    if isinstance(working_manifest, dict):
+        working_tree = {
+            "name": working_manifest.get("name") if isinstance(working_manifest.get("name"), str) else "",
+            "type": working_manifest.get("type") if isinstance(working_manifest.get("type"), str) else "library",
+            "declared_version": working_manifest.get("version") if isinstance(working_manifest.get("version"), str) else None,
+        }
     tags_at_head = [
         tag for tag in git_value(
             repo, "for-each-ref", "--points-at=HEAD", "--format=%(refname:short)", "refs/tags"
@@ -175,6 +197,8 @@ def composer_record(repo: Path) -> dict[str, Any] | None:
         "name": name,
         "type": package_type,
         "declared_version": declared or None,
+        "working_tree": working_tree,
+        "working_tree_differs_from_head": working_manifest != manifest,
         "tags_at_head": tags_at_head,
         "tagged_releases": tagged_releases,
         "historical_package_identities": historical_package_identities,

@@ -166,6 +166,25 @@ class ProjectDossierCliTest(unittest.TestCase):
                 "ref": "refs/tags/v1.4.0",
             }])
 
+    def test_dirty_manifest_version_is_reported_but_not_treated_as_a_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "dirty-manifest"
+            initialise(root, "dean/example", "1.0.0")
+            (root / "composer.json").write_text(json.dumps({
+                "name": "dean/example",
+                "type": "library",
+                "version": "9.9.9",
+            }) + "\n")
+
+            result = dossier(root)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            package = json.loads(result.stdout)["repositories"][0]["composer"]
+            self.assertEqual(package["declared_version"], "1.0.0")
+            self.assertEqual(package["version_candidates"], ["1.0.0"])
+            self.assertTrue(package["working_tree_differs_from_head"])
+            self.assertEqual(package["working_tree"]["declared_version"], "9.9.9")
+
     def test_duplicate_composer_identities_are_reported_at_estate_level(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
