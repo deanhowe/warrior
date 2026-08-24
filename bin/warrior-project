@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""Build a read-only project/package dossier before any Forge import.
+
+`warrior-project dossier` discovers independent Git boundaries, prunes
+dependency/build trees, and records only evidence: refs, dirt, remotes,
+Composer identity, and version candidates. It never decides ownership from a
+directory name and never creates, wires, commits, publishes, or pushes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Any, Iterable
+
+_LIB = Path(__file__).resolve().parent.parent / "lib"
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from warrior_forge import git, redact_url_userinfo  # noqa: E402
+
+
+PRUNED_DIRECTORIES = {
+    ".git", ".hg", ".svn", "vendor", "node_modules", "Pods", "target",
+    "dist", "build", ".build", ".venv", "venv", "site-packages",
+}
+AGENT_STATE_NAMES = {
+    ".ai", ".claude", ".codex", ".docs", ".goals", ".kiro", ".knowledge",
+}
+PACKAGE_NAME = re.compile(r"^[a-z0-9_.-]+/[a-z0-9_.-]+$")
+VERSION = re.compile(r"^v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?$")
+
+
+def discover_repositories(roots: Iterable[Path], max_depth: int) -> list[Path]:
+    found: set[Path] = set()
+    for supplied_root in roots:
+        root = supplied_root.expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError(f"not a directory: {root}")
+        for current, directories, _files in os.walk(root, followlinks=False):
+            here = Path(current)
+            depth = len(here.relative_to(root).parts)
+            if depth > max_depth:
+                directories[:] = []
+                continue
+            if ".git" in directories or (here / ".git").is_file():
+                found.add(here)
+            directories[:] = sorted(
+                name for name in directories
+                if name not in PRUNED_DIRECTORIES
+            )
+    return sorted(found, key=lambda item: str(item).casefold())
+
+
+def git_value(repo: Path, *arguments: str) -> str:
+    code, output, _error = git(repo, *arguments)
+    return output if code == 0 else ""
+
+
+def remotes(repo: Path) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    for line in git_value(repo, "remote", "-v").splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        records.append({
+            "name": parts[0],
+            "url": redact_url_userinfo(parts[1]),
+            "direction": parts[2].strip("()"),
+        })
+    return records
+
+
+def repository_role(repo: Path) -> str:
+    return "auxiliary-agent-state" if AGENT_STATE_NAMES.intersection(repo.parts) else "source"
+
+
+def composer_repositories(value: Any) -> list[dict[str, str]]:
+    entries: list[Any]
+    if isinstance(value, list):
+        entries = value
+    elif isinstance(value, dict):
+        entries = list(value.values())
+    else:
+        return []
+
+    result: list[dict[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        repository_type = str(entry.get("type", "unknown"))
+        url = entry.get("url")
+        result.append({
+            "type": repository_type,
+            "url": redact_url_userinfo(str(url)) if url else "",
+        })
+    return result
+
+
+def composer_record(repo: Path) -> dict[str, Any] | None:
+    manifest_path = repo / "composer.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError) as error:
+        return {
+            "valid_json": False,
+            "publishable": False,
+            "blockers": ["invalid-composer-json"],
+            "error": str(error),
+        }
+    if not isinstance(manifest, dict):
+        return {
+            "valid_json": False,
+            "publishable": False,
+            "blockers": ["composer-json-is-not-an-object"],
+        }
+
+    name = manifest.get("name") if isinstance(manifest.get("name"), str) else ""
+    package_type = manifest.get("type") if isinstance(manifest.get("type"), str) else "library"
+    declared = manifest.get("version") if isinstance(manifest.get("version"), str) else ""
+    tags_at_head = [
+        tag for tag in git_value(
+            repo, "for-each-ref", "--points-at=HEAD", "--format=%(refname:short)", "refs/tags"
+        ).splitlines()
+        if VERSION.fullmatch(tag)
+    ]
+    tagged_releases: list[dict[str, str]] = []
+    for ref in git_value(
+        repo,
+        "for-each-ref",
+        "--sort=-version:refname",
+        "--format=%(refname)",
+        "refs/tags",
+    ).splitlines():
+        version = ref.removeprefix("refs/tags/")
+        if VERSION.fullmatch(version):
+            tagged_releases.append({"version": version, "ref": ref})
+    versions: list[str] = []
+    if declared and VERSION.fullmatch(declared):
+        versions.append(declared)
+    versions.extend(
+        release["version"]
+        for release in tagged_releases
+        if release["version"] not in versions
+    )
+
+    blockers: list[str] = []
+    if not PACKAGE_NAME.fullmatch(name):
+        blockers.append("invalid-or-placeholder-package-name")
+    if package_type in {"project", "metapackage"}:
+        blockers.append(f"composer-type-{package_type}")
+    if not versions:
+        blockers.append("no-evidence-backed-version")
+    if not git_value(repo, "rev-parse", "HEAD"):
+        blockers.append("repository-has-no-commit")
+
+    return {
+        "valid_json": True,
+        "name": name,
+        "type": package_type,
+        "declared_version": declared or None,
+        "tags_at_head": tags_at_head,
+        "tagged_releases": tagged_releases,
+        "version_candidates": versions,
+        "repositories": composer_repositories(manifest.get("repositories")),
+        "publishable": not blockers,
+        "blockers": blockers,
+    }
+
+
+def inspect(repo: Path) -> dict[str, Any]:
+    status = git_value(repo, "status", "--porcelain=v1", "-z", "--no-renames")
+    entries = [entry for entry in status.split("\0") if entry]
+    staged = sum(1 for entry in entries if len(entry) >= 2 and entry[0] not in {" ", "?"})
+    modified = sum(1 for entry in entries if len(entry) >= 2 and entry[1] != " ")
+    untracked = sum(1 for entry in entries if entry.startswith("??"))
+    roots = git_value(repo, "rev-list", "--max-parents=0", "--all").splitlines()
+    return {
+        "path": str(repo),
+        "role_hint": repository_role(repo),
+        "branch": git_value(repo, "branch", "--show-current") or None,
+        "head": git_value(repo, "rev-parse", "HEAD") or None,
+        "root_commits": roots,
+        "dirty": bool(entries),
+        "dirty_counts": {
+            "staged": staged,
+            "modified": modified,
+            "untracked": untracked,
+        },
+        "remotes": remotes(repo),
+        "composer": composer_record(repo),
+    }
+
+
+def build_dossier(roots: list[Path], max_depth: int) -> dict[str, Any]:
+    repositories = discover_repositories(roots, max_depth)
+    inspected = [inspect(repo) for repo in repositories]
+    package_paths: dict[str, list[str]] = {}
+    for repository in inspected:
+        package = repository["composer"]
+        if package and package.get("valid_json") and package.get("name"):
+            package_paths.setdefault(package["name"], []).append(repository["path"])
+    conflicts = [
+        {"name": name, "paths": sorted(paths)}
+        for name, paths in sorted(package_paths.items())
+        if len(paths) > 1
+    ]
+    return {
+        "schema": 2,
+        "read_only": True,
+        "roots": [str(root.expanduser().resolve()) for root in roots],
+        "repositories_discovered": len(repositories),
+        "package_identity_conflicts": conflicts,
+        "repositories": inspected,
+    }
+
+
+def human(report: dict[str, Any]) -> str:
+    lines = [
+        "Warrior project dossier — read-only",
+        f"Repositories: {report['repositories_discovered']}",
+    ]
+    for repo in report["repositories"]:
+        package = repo["composer"]
+        label = package.get("name") if package else "(no Composer package)"
+        state = "publishable" if package and package.get("publishable") else "review"
+        lines.append(f"  {repo['path']} — {label} — {state}")
+    return "\n".join(lines)
+
+
+def parser() -> argparse.ArgumentParser:
+    command = argparse.ArgumentParser(prog="warrior-project", description=__doc__)
+    subcommands = command.add_subparsers(dest="command", required=True)
+    dossier = subcommands.add_parser("dossier", help="build a read-only Git and package dossier")
+    dossier.add_argument("roots", nargs="+")
+    dossier.add_argument("--max-depth", type=int, default=7)
+    dossier.add_argument("--json", action="store_true")
+    return command
+
+
+def main() -> int:
+    arguments = parser().parse_args()
+    try:
+        report = build_dossier([Path(root) for root in arguments.roots], arguments.max_depth)
+    except ValueError as error:
+        print(f"warrior-project: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps(report, indent=2) if arguments.json else human(report))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -190,6 +190,25 @@ refresh, record the reviewed source commits and exact backports in the manifest.
 The auditor reports both, while continuing to verify the reproducible pinned
 base and every resulting local divergence.
 
+## Before importing a project or package estate
+
+Do not create repositories from directory names or publish whatever happens to
+be in a dirty working tree. Build the evidence dossier first:
+
+```bash
+warrior-project dossier ~/code/packages
+warrior-project dossier ~/code/packages --json
+```
+
+`warrior-project` discovers independent Git boundaries while pruning dependency
+and build trees. It records root commits, current refs, dirty state and redacted
+remotes. For Composer packages it accepts only versions declared in the
+manifest or proven by semantic-version tags anywhere in history. Placeholder
+names, applications/metapackages, repositories with no commit, packages with no
+evidence-backed version, and duplicate package identities remain explicit
+blockers. The command is read-only: it does not create a repository, add a
+remote, publish a package, or decide who owns a fork.
+
 ## Chapter 3 — Know your estate
 
 ```bash

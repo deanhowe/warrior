@@ -63,7 +63,7 @@ marketplace, the same pattern upstream uses. Run
 
 ### Preservation — the layer everything else sits on
 
-Ten tools in `bin/`, all read-only or additive:
+Eleven tools in `bin/`, all read-only or additive:
 
 | Tool | What it does |
 |---|---|
@@ -77,6 +77,7 @@ Ten tools in `bin/`, all read-only or additive:
 | `warrior-knowledge` | Read-only health check for a Git-backed knowledge source: identity, dirt, remote symbolic HEAD, and exact local/remote commit equality; no harness or forge assumptions |
 | `warrior-history` | History doctor: explains large blobs, databases, archives, compiled artifacts, multiple roots and unreachable commits, then can remove exact paths from a new disconnected candidate without rewriting the source |
 | `warrior-upstream` | Proves a vendored source relationship from a manifest: exact commit, byte-identical files, renames, declared adaptations, omissions, and undeclared drift—without fetching or updating anything |
+| `warrior-project` | Builds a read-only dossier of nested Git boundaries and Composer packages before an import: roots, dirt, sanitized remotes, release-tag evidence, blockers, and duplicate package identities |
 
 ### Platform
 
