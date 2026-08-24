@@ -91,6 +91,9 @@ def load_manifest(path: Path) -> dict[str, Any]:
             raise AuditError(f"manifest is missing {field}")
     if not isinstance(manifest["mappings"], list) or not manifest["mappings"]:
         raise AuditError("manifest mappings must be a non-empty list")
+    for field in ("reviewed_sources", "backports"):
+        if field in manifest and not isinstance(manifest[field], list):
+            raise AuditError(f"manifest {field} must be a list")
     return manifest
 
 
@@ -177,6 +180,8 @@ def audit(manifest_path: Path, source: Path) -> dict[str, Any]:
         "source_commit_actual": actual_commit,
         "source_commit_matches": actual_commit == expected_commit,
         "source_clean": source_clean,
+        "reviewed_sources": manifest.get("reviewed_sources", []),
+        "backports": manifest.get("backports", []),
         "healthy": healthy,
         "counts": counts,
         "findings": findings,
@@ -206,6 +211,8 @@ def main() -> int:
         status = "healthy" if report["healthy"] else "attention required"
         print(f"{report['name']}: {status}")
         print(f"source commit: {report['source_commit_actual']}")
+        print(f"reviewed source commits: {len(report['reviewed_sources'])}")
+        print(f"selective backports: {len(report['backports'])}")
         for kind in KINDS:
             print(f"{kind.replace('_', ' ')}: {report['counts'][kind]}")
     return 0 if report["healthy"] else 1

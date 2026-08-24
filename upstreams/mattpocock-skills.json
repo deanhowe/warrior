@@ -4,6 +4,46 @@
   "source_url": "https://github.com/mattpocock/skills.git",
   "source_commit": "8b78b531ab965735c5dc74f6f7a219e1e37326df",
   "vendor_root": "..",
+  "reviewed_sources": [
+    {
+      "source_commit": "5b15a47f2d7150f545fbcacbfe381787fc0230dc",
+      "decision": "selective-backport",
+      "review": "reviews/mattpocock-skills-2026-08-24.md"
+    },
+    {
+      "source_commit": "6654f6b60cd9d5be8b54c6fafe44346dabeb3b76",
+      "decision": "no-import-surface-change",
+      "review": "reviews/mattpocock-skills-2026-08-24.md"
+    }
+  ],
+  "backports": [
+    {
+      "source_commit": "1dab98299c3b81f560026c01b7ebf55ed5d91373",
+      "paths": [
+        "skills/engineering/code-review/SKILL.md",
+        "skills/engineering/diagnosing-bugs/SKILL.md",
+        "skills/engineering/to-spec/SKILL.md",
+        "skills/engineering/to-tickets/SKILL.md",
+        "skills/engineering/triage/SKILL.md",
+        "skills/engineering/wayfinder/SKILL.md"
+      ],
+      "reason": "Do not let one user-invoked skill silently invoke another; retain Warrior's renamed setup skill and adapt the debugging handoff into a recommendation."
+    },
+    {
+      "source_commit": "d6cd26f7f245e67ea7d0554a2fe468cd9def6e6f",
+      "paths": [
+        "skills/productivity/wait-what/SKILL.md"
+      ],
+      "reason": "Follow CONTEXT-MAP.md when a repository has more than one domain context."
+    },
+    {
+      "source_commit": "85f83d3fde1d3a90d5c9a657f6998c79a6c37308",
+      "paths": [
+        "skills/productivity/grilling/SKILL.md"
+      ],
+      "reason": "Separate multiple questions in one round with a visible rule."
+    }
+  ],
   "mappings": [
     {
       "source": "skills/engineering",
@@ -33,13 +73,16 @@
   "expected_divergences": {
     "skills/engineering/README.md": "Use Warrior's harness-neutral skill names and grouping.",
     "skills/engineering/ask-warrior/SKILL.md": "Rename the upstream ask-matt router for Warrior.",
-    "skills/engineering/code-review/SKILL.md": "Point internal references at Warrior's renamed setup skill.",
+    "skills/engineering/code-review/SKILL.md": "Point internal references at Warrior's renamed setup skill and respect its user-invoked boundary.",
+    "skills/engineering/diagnosing-bugs/SKILL.md": "Preserve the architectural post-mortem while respecting the target skill's user-invoked boundary.",
     "skills/engineering/setup-engineering-skills/SKILL.md": "Make setup product-neutral and add Gitea as a supported issue tracker.",
-    "skills/engineering/to-spec/SKILL.md": "Point setup guidance at Warrior's renamed skill.",
-    "skills/engineering/to-tickets/SKILL.md": "Point setup guidance at Warrior's renamed skill.",
-    "skills/engineering/triage/SKILL.md": "Point setup guidance at Warrior's renamed skill.",
-    "skills/engineering/wayfinder/SKILL.md": "Point setup guidance at Warrior's renamed skill.",
-    "skills/misc/git-guardrails-claude-code/scripts/block-dangerous-git.sh": "Also block destructive checkout and restore path forms encountered in production use."
+    "skills/engineering/to-spec/SKILL.md": "Point setup guidance at Warrior's renamed skill and respect its user-invoked boundary.",
+    "skills/engineering/to-tickets/SKILL.md": "Point setup guidance at Warrior's renamed skill and respect its user-invoked boundary.",
+    "skills/engineering/triage/SKILL.md": "Point setup guidance at Warrior's renamed skill and respect its user-invoked boundary.",
+    "skills/engineering/wayfinder/SKILL.md": "Point setup guidance at Warrior's renamed skill and respect its user-invoked boundary.",
+    "skills/misc/git-guardrails-claude-code/scripts/block-dangerous-git.sh": "Also block destructive checkout and restore path forms encountered in production use.",
+    "skills/productivity/grilling/SKILL.md": "Backport clearer separation between multiple questions in a round without adopting an unrelated punctuation sweep.",
+    "skills/productivity/wait-what/SKILL.md": "Backport multi-context CONTEXT-MAP.md lookup without adopting an unrelated punctuation sweep."
   },
   "expected_extras": {
     "skills/engineering/setup-engineering-skills/issue-tracker-gitea.md": "Warrior supports a self-hosted Gitea or Forgejo issue tracker."

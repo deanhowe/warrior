@@ -155,6 +155,11 @@ better. Updating a transformed import requires human review of both the new
 source and the declared local intent; turning that into one automatic command
 would erase the boundary this tool exists to make visible.
 
+When that review chooses individual portable fixes instead of a bulk source
+refresh, record the reviewed source commits and exact backports in the manifest.
+The auditor reports both, while continuing to verify the reproducible pinned
+base and every resulting local divergence.
+
 ## Chapter 3 — Know your estate
 
 ```bash

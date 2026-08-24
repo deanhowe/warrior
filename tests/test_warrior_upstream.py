@@ -75,6 +75,15 @@ class UpstreamAuditCliTest(unittest.TestCase):
                 "expected_extras": {
                     "skills/a/local.md": "local integration"
                 },
+                "reviewed_sources": [{
+                    "source_commit": "f" * 40,
+                    "decision": "selective-backport"
+                }],
+                "backports": [{
+                    "source_commit": "f" * 40,
+                    "paths": ["skills/a/new-name.md"],
+                    "reason": "portable behavior"
+                }],
             }))
 
             result = run_audit("--manifest", str(manifest), "--source", str(source), "--json")
@@ -84,6 +93,8 @@ class UpstreamAuditCliTest(unittest.TestCase):
             self.assertTrue(report["healthy"])
             self.assertEqual(report["source_commit_actual"], source_commit)
             self.assertTrue(report["source_clean"])
+            self.assertEqual(report["reviewed_sources"][0]["decision"], "selective-backport")
+            self.assertEqual(report["backports"][0]["reason"], "portable behavior")
             self.assertEqual(report["counts"], {
                 "declared_divergence": 1,
                 "expected_extra": 1,
@@ -93,6 +104,11 @@ class UpstreamAuditCliTest(unittest.TestCase):
                 "unexpected_difference": 0,
                 "unexpected_extra": 0,
             })
+
+            human = run_audit("--manifest", str(manifest), "--source", str(source))
+            self.assertEqual(human.returncode, 0, human.stderr)
+            self.assertIn("reviewed source commits: 1", human.stdout)
+            self.assertIn("selective backports: 1", human.stdout)
 
             (source / "skills" / "a" / "same.md").write_text("dirty source\n")
             dirty_source = run_audit("--manifest", str(manifest), "--source", str(source), "--json")

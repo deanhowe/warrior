@@ -41,5 +41,7 @@ python3 bin/warrior-upstream audit \
   --source /path/to/mattpocock-skills
 ```
 
-The audit currently proves 70 byte-identical files, 9 declared divergences,
-and 1 declared Warrior-only file. It does not fetch or update upstream.
+The audit currently proves 67 byte-identical files, 12 declared divergences,
+and 1 declared Warrior-only file. Newer source commits reviewed and selectively
+backported after the pinned import are recorded in the manifest and under
+`upstreams/reviews/`. The audit does not fetch or update upstream.
