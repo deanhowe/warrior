@@ -87,7 +87,8 @@ preserving and reviewing what was already there.
 Only `warrior-scan` has had the full treatment this contract describes:
 independent agents actively trying to break it, live against real
 repositories, not just reading the code. That's where the four bugs above
-came from. `warrior-protect` and `warrior-classify` share its guarded
+came from. `warrior-protect`, `warrior-classify`, and
+`warrior-project checkpoint-plan` share its guarded
 `--output` path and were spot-tested live against the same destructive
 attempts, but haven't had an independent adversarial pass of their own.
 `warrior-facts` has no write path at all, which is a different kind of

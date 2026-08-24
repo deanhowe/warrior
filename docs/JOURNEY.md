@@ -213,6 +213,34 @@ evidence-backed version, and duplicate package identities remain explicit
 blockers. The command is read-only: it does not create a repository, add a
 remote, publish a package, or decide who owns a fork.
 
+### Turn the dossier into a checkpoint closure plan
+
+Run `warrior-scan` on the same roots first, then:
+
+```bash
+warrior-project checkpoint-plan ~/code/packages
+warrior-project checkpoint-plan ~/code/packages --json \
+  --output ~/Desktop/packages-checkpoint-plan.json
+```
+
+The plan pins each repository's current `HEAD`, root commits, and a SHA-256
+digest of its exact porcelain status. It reports checkpoint state separately
+from package state, so an unversioned package is not confused with an
+unprotected working tree. Every repository receives one closure verdict:
+`ready`, `checkpoint-needed`, or `human-review-required`.
+
+Ordinary changed paths are listed with their two-character Git status.
+Credential-shaped and private-state filenames are counted but withheld; their
+presence blocks automation instead of leaking their names into a report.
+Duplicate Composer identities and committed-manifest blockers are attached to
+each affected repository, not left only as an estate-wide footnote.
+
+This command creates evidence, not a checkpoint. `required_artifacts` says
+which independent representations would be needed—staged-index patch,
+tracked-worktree patch, and/or untracked-content manifest—but no apply command
+exists yet. The report writer uses Warrior's guarded output path and refuses to
+overwrite an existing file unless `--overwrite` is explicit.
+
 ## Chapter 3 — Know your estate
 
 ```bash

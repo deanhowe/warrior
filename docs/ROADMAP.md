@@ -2,7 +2,7 @@
 
 ## Chapter 1 — Know your machine, never lose work (SHIPPED)
 
-Ten tools, each read-only or additive, each with real tests:
+Eleven tools, each read-only or additive, each with real tests:
 
 - **`warrior-scan`** — read-only work-loss scan: what could be lost right now,
   and where. Eleven vectors, from JetBrains shelves to unreachable commits.
@@ -33,6 +33,10 @@ Ten tools, each read-only or additive, each with real tests:
 - **`warrior-upstream`** — verifies a transformed vendored source against an
   explicit manifest: pinned commit, selected trees, renames, declared
   divergences, and local extras. It never fetches or updates either tree.
+- **`warrior-project`** — discovers nested Git and Composer boundaries before
+  import and produces a state-pinned checkpoint closure plan with one verdict
+  per repository. It withholds sensitive names and does not create checkpoints,
+  repositories, packages, remotes, commits, or pushes.
 
 Exact-path history removal into a new, disconnected, verified candidate is
 shipped. Content-level secret replacement, commit surgery, canonical cutover,

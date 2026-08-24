@@ -4,6 +4,12 @@ All notable Warrior releases are recorded here.
 
 ## Unreleased
 
+- Add `warrior-project checkpoint-plan`: a read-only closure ledger pinned to
+  repository HEAD and exact status, with separate checkpoint/package states,
+  per-repository verdicts, duplicate-identity blockers, sensitive-name
+  withholding, and guarded JSON output.
+- Preserve raw porcelain status so working-tree modifications cannot be
+  misclassified as staged changes by stripped leading whitespace.
 - Add exact-path history rewriting into a new disconnected candidate repository.
 - Pin and re-verify source refs, reject dirty or drifted sources and existing
   destinations, remove candidate remotes, run full object verification, and

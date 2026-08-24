@@ -525,7 +525,8 @@ def assert_safe_git(args: Sequence[str]) -> None:
 GIT_GLOBAL = ("--no-optional-locks", "-c", "core.fsmonitor=", "-c", "protocol.ext.allow=never")
 
 
-def git(repo: str | Path, *args: str, timeout: int = 300) -> tuple[int, str, str]:
+def git(repo: str | Path, *args: str, timeout: int = 300,
+        strip_output: bool = True) -> tuple[int, str, str]:
     """Run a validated, non-interactive git command. Returns (code, out, err)."""
     assert_safe_git(args)
     environment = dict(os.environ)
@@ -541,7 +542,8 @@ def git(repo: str | Path, *args: str, timeout: int = 300) -> tuple[int, str, str
         return -1, "", f"timed out after {timeout}s"
     except OSError as error:
         return -1, "", str(error)
-    return process.returncode, process.stdout.strip(), process.stderr.strip()
+    stdout = process.stdout.strip() if strip_output else process.stdout
+    return process.returncode, stdout, process.stderr.strip()
 
 
 def parse_ls_remote(output: str) -> dict[str, str]:

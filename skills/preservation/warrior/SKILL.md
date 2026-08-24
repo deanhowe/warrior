@@ -1,11 +1,11 @@
 ---
 name: warrior
-description: Find work that git is hiding from the user (shelves, stashes, index-only content, unreachable commits, unmirrored repos) and give it a safe, verified home. Use when auditing a developer's machine for lost or at-risk work, before any bulk git operation, when asked "where is X on my machine", or when a developer expresses fear or uncertainty about git.
+description: Find work that git is hiding from the user and plan a safe home for it. Use when auditing a machine for lost or at-risk work, before a bulk Git operation or project/package import, when asked where work lives, or when a developer is uncertain about Git state.
 ---
 
 # Warrior
 
-Five read-only or additive tools, in `bin/`. Read `docs/SAFETY.md` before
+Read-only or additive tools live in `bin/`. Read `docs/SAFETY.md` before
 proposing any command from this skill, and `docs/JOURNEY.md` for the full
 guided path — this file is the terse operating summary.
 
@@ -20,7 +20,11 @@ guided path — this file is the terse operating summary.
    `docs/JOURNEY.md` Chapter 2. **Copy the content out before touching the
    original** — never apply a shelf, pop a stash, or reset toward a found
    commit as the first action.
-4. Only after nothing is at risk: `warrior-facts` to orient on the estate,
+4. Before importing an estate, run `warrior-project dossier <roots...>`, then
+   `warrior-project checkpoint-plan <roots...>`. The plan pins current state
+   and gives every repository a closure verdict; it does not create a
+   checkpoint or grant authority to apply one.
+5. Only after nothing is at risk: `warrior-facts` to orient on the estate,
    `warrior-protect` to give unprotected repos a home, `warrior-classify` to
    record what each repository is for.
 

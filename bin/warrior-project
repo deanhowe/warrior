@@ -10,6 +10,7 @@ directory name and never creates, wires, commits, publishes, or pushes.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -21,7 +22,7 @@ _LIB = Path(__file__).resolve().parent.parent / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
-from warrior_forge import git, redact_url_userinfo  # noqa: E402
+from warrior_forge import ConfigError, git, redact_url_userinfo, safe_output_path  # noqa: E402
 
 
 PRUNED_DIRECTORIES = {
@@ -33,6 +34,12 @@ AGENT_STATE_NAMES = {
 }
 PACKAGE_NAME = re.compile(r"^[a-z0-9_.-]+/[a-z0-9_.-]+$")
 VERSION = re.compile(r"^v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?$")
+SENSITIVE_PATH = re.compile(
+    r"(?:^|/)(?:\.tax|\.aws|\.gnupg|\.ssh|Keychains|credentials|secrets)(?:/|$)"
+    r"|(?:^|[._-])(?:credential|secret|token|password|private[-_]?key|id_rsa|id_ed25519)(?:[._-]|$)"
+    r"|(?:^|/)\.env(?:[./_-]|$)",
+    re.IGNORECASE,
+)
 
 
 def discover_repositories(roots: Iterable[Path], max_depth: int) -> list[Path]:
@@ -56,8 +63,8 @@ def discover_repositories(roots: Iterable[Path], max_depth: int) -> list[Path]:
     return sorted(found, key=lambda item: str(item).casefold())
 
 
-def git_value(repo: Path, *arguments: str) -> str:
-    code, output, _error = git(repo, *arguments)
+def git_value(repo: Path, *arguments: str, strip_output: bool = True) -> str:
+    code, output, _error = git(repo, *arguments, strip_output=strip_output)
     return output if code == 0 else ""
 
 
@@ -210,7 +217,10 @@ def composer_record(repo: Path) -> dict[str, Any] | None:
 
 
 def inspect(repo: Path) -> dict[str, Any]:
-    status = git_value(repo, "status", "--porcelain=v1", "-z", "--no-renames")
+    status = git_value(
+        repo, "status", "--porcelain=v1", "-z", "--no-renames",
+        strip_output=False,
+    )
     entries = [entry for entry in status.split("\0") if entry]
     staged = sum(1 for entry in entries if len(entry) >= 2 and entry[0] not in {" ", "?"})
     modified = sum(1 for entry in entries if len(entry) >= 2 and entry[1] != " ")
@@ -256,6 +266,139 @@ def build_dossier(roots: list[Path], max_depth: int) -> dict[str, Any]:
     }
 
 
+def status_entries(repo: Path) -> tuple[str, list[tuple[str, str]]]:
+    code, raw, _error = git(
+        repo, "status", "--porcelain=v1", "-z", "--no-renames",
+        strip_output=False,
+    )
+    if code != 0:
+        raise ValueError(f"could not read Git status for {repo}")
+    entries: list[tuple[str, str]] = []
+    for entry in raw.split("\0"):
+        if len(entry) < 4:
+            continue
+        entries.append((entry[:2], entry[3:]))
+    return raw, entries
+
+
+def checkpoint_record(
+    repository: dict[str, Any],
+    identity_conflict: bool = False,
+) -> dict[str, Any]:
+    repo = Path(repository["path"])
+    raw, entries = status_entries(repo)
+    counts = {
+        "staged": 0,
+        "modified": 0,
+        "deleted": 0,
+        "untracked": 0,
+        "sensitive_withheld": 0,
+    }
+    visible_changes: list[dict[str, str]] = []
+    required: set[str] = set()
+    for status, path in entries:
+        sensitive = bool(SENSITIVE_PATH.search(path))
+        if sensitive:
+            counts["sensitive_withheld"] += 1
+        else:
+            visible_changes.append({"status": status, "path": path})
+        if status == "??":
+            counts["untracked"] += 1
+            required.add("untracked-content-manifest")
+            continue
+        if status[0] not in {" ", "?"}:
+            counts["staged"] += 1
+            required.add("staged-index-patch")
+        if "D" in status:
+            counts["deleted"] += 1
+        elif status[1] != " ":
+            counts["modified"] += 1
+            required.add("tracked-worktree-patch")
+
+    checkpoint_status = "not-needed"
+    if entries:
+        checkpoint_status = "blocked" if counts["sensitive_withheld"] else "needed"
+    package = repository["composer"]
+    if package is None:
+        package_status = "not-a-package"
+    elif identity_conflict or not package.get("publishable"):
+        package_status = "blocked"
+    else:
+        package_status = "publishable"
+
+    issues: list[str] = []
+    if entries:
+        issues.append("dirty-working-tree")
+    if counts["sensitive_withheld"]:
+        issues.append("sensitive-paths-withheld")
+    if not repository["head"]:
+        issues.append("repository-has-no-commit")
+    if identity_conflict:
+        issues.append("duplicate-package-identity")
+    if package:
+        issues.extend(f"composer:{blocker}" for blocker in package.get("blockers", []))
+
+    if checkpoint_status == "blocked" or package_status == "blocked" or not repository["head"]:
+        verdict = "human-review-required"
+    elif checkpoint_status == "needed":
+        verdict = "checkpoint-needed"
+    else:
+        verdict = "ready"
+    return {
+        "path": repository["path"],
+        "role_hint": repository["role_hint"],
+        "branch": repository["branch"],
+        "head": repository["head"],
+        "root_commits": repository["root_commits"],
+        "status_digest": hashlib.sha256(raw.encode()).hexdigest(),
+        "checkpoint_status": checkpoint_status,
+        "package_status": package_status,
+        "verdict": verdict,
+        "issues": issues,
+        "change_counts": counts,
+        "visible_changes": visible_changes,
+        "required_artifacts": [
+            artifact for artifact in (
+                "staged-index-patch",
+                "tracked-worktree-patch",
+                "untracked-content-manifest",
+            )
+            if artifact in required
+        ],
+        "warnings": (["sensitive path names withheld; human review required"]
+                     if counts["sensitive_withheld"] else []),
+        "composer": package,
+    }
+
+
+def build_checkpoint_plan(roots: list[Path], max_depth: int) -> dict[str, Any]:
+    dossier = build_dossier(roots, max_depth)
+    conflicted_paths = {
+        path
+        for conflict in dossier["package_identity_conflicts"]
+        for path in conflict["paths"]
+    }
+    repositories = [
+        checkpoint_record(repository, repository["path"] in conflicted_paths)
+        for repository in dossier["repositories"]
+    ]
+    summary = {
+        "repositories": len(repositories),
+        "checkpoint_needed": sum(item["checkpoint_status"] == "needed" for item in repositories),
+        "human_review_required": sum(item["verdict"] == "human-review-required" for item in repositories),
+        "checkpoint_not_needed": sum(item["checkpoint_status"] == "not-needed" for item in repositories),
+    }
+    return {
+        "schema": 1,
+        "read_only": True,
+        "roots": dossier["roots"],
+        "prerequisite": "run warrior-scan on the same roots before applying any checkpoint",
+        "package_identity_conflicts": dossier["package_identity_conflicts"],
+        "summary": summary,
+        "repositories": repositories,
+    }
+
+
 def human(report: dict[str, Any]) -> str:
     lines = [
         "Warrior project dossier — read-only",
@@ -269,6 +412,20 @@ def human(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def human_checkpoint_plan(report: dict[str, Any]) -> str:
+    summary = report["summary"]
+    lines = [
+        "Warrior checkpoint plan — read-only",
+        f"Repositories: {summary['repositories']}",
+        f"Checkpoint needed: {summary['checkpoint_needed']}",
+        f"Human review required: {summary['human_review_required']}",
+        f"No checkpoint needed: {summary['checkpoint_not_needed']}",
+    ]
+    for repository in report["repositories"]:
+        lines.append(f"  {repository['path']} — {repository['verdict']}")
+    return "\n".join(lines)
+
+
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog="warrior-project", description=__doc__)
     subcommands = command.add_subparsers(dest="command", required=True)
@@ -276,17 +433,42 @@ def parser() -> argparse.ArgumentParser:
     dossier.add_argument("roots", nargs="+")
     dossier.add_argument("--max-depth", type=int, default=7)
     dossier.add_argument("--json", action="store_true")
+    checkpoint = subcommands.add_parser(
+        "checkpoint-plan",
+        help="build a read-only, state-pinned checkpoint closure plan",
+    )
+    checkpoint.add_argument("roots", nargs="+")
+    checkpoint.add_argument("--max-depth", type=int, default=7)
+    checkpoint.add_argument("--json", action="store_true")
+    checkpoint.add_argument("--output", type=Path, help="write the JSON report safely")
+    checkpoint.add_argument("--overwrite", action="store_true",
+                            help="allow --output to replace an existing report")
     return command
 
 
 def main() -> int:
     arguments = parser().parse_args()
     try:
-        report = build_dossier([Path(root) for root in arguments.roots], arguments.max_depth)
-    except ValueError as error:
+        destination = (
+            safe_output_path(arguments.output, overwrite=arguments.overwrite)
+            if arguments.command == "checkpoint-plan" and arguments.output
+            else None
+        )
+        roots = [Path(root) for root in arguments.roots]
+        report = (
+            build_dossier(roots, arguments.max_depth)
+            if arguments.command == "dossier"
+            else build_checkpoint_plan(roots, arguments.max_depth)
+        )
+    except (ConfigError, ValueError) as error:
         print(f"warrior-project: {error}", file=sys.stderr)
         return 2
-    print(json.dumps(report, indent=2) if arguments.json else human(report))
+    if destination:
+        destination.write_text(json.dumps(report, indent=2) + "\n")
+    if arguments.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(human(report) if arguments.command == "dossier" else human_checkpoint_plan(report))
     return 0
 
 
