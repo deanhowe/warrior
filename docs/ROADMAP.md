@@ -34,9 +34,10 @@ Ten tools, each read-only or additive, each with real tests:
   explicit manifest: pinned commit, selected trees, renames, declared
   divergences, and local extras. It never fetches or updates either tree.
 
-History candidate generation and canonical cutover are deliberately not
-shipped. Upstream refresh/candidate generation is also not shipped. Assessment
-is the proven boundary today; rewriting and updating remain roadmap.
+Exact-path history removal into a new, disconnected, verified candidate is
+shipped. Content-level secret replacement, commit surgery, canonical cutover,
+and rewritten-history pushes are deliberately not shipped. Upstream
+refresh/candidate generation is also not shipped.
 
 This chapter is real. It has been run against 415 repositories on a live
 machine, adversarially audited for safety and portability, and used to

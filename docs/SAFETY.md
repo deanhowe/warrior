@@ -52,6 +52,25 @@ exit code of `0` is not proof anything happened correctly; several findings
 in this project's own history came from things that returned success while
 doing the wrong thing, or nothing at all.
 
+## Candidate history rewrites
+
+`warrior-history build-candidate` is the deliberate exception to the tools'
+read-only default. Its write authority is confined to one destination path
+that must not exist. It never invokes `git-filter-repo` in the source:
+
+- the source working tree must be clean;
+- the plan pins source HEAD and every ref;
+- the candidate is a `--mirror --no-local` clone at a new path;
+- `git-filter-repo --force` runs only with the candidate as its working directory;
+- the candidate retains no remote;
+- requested paths must be absent across all candidate refs;
+- candidate `git fsck --full` must pass;
+- source HEAD and refs are rechecked after rewriting;
+- failed or partial candidates are preserved, never automatically deleted.
+
+The command does not replace a canonical repository, change a source ref,
+delete a source object, push rewritten history, or force-push anything.
+
 ## Adversarial review coverage, stated per tool
 
 Only `warrior-scan` has had the full treatment this contract describes:

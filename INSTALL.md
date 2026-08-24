@@ -1,6 +1,12 @@
 # Install
 
-No dependencies beyond Python 3.9 or later. Everything is stdlib.
+Warrior targets macOS Tahoe 26 and requires Python 3.9 or later. The assessment
+tools use only the standard library. Building a history rewrite candidate also
+requires `git-filter-repo`:
+
+```bash
+brew install git-filter-repo
+```
 
 ```bash
 git clone <this-repo>

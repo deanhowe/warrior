@@ -2,6 +2,14 @@
 
 All notable Warrior releases are recorded here.
 
+## Unreleased
+
+- Add exact-path history rewriting into a new disconnected candidate repository.
+- Pin and re-verify source refs, reject dirty or drifted sources and existing
+  destinations, remove candidate remotes, run full object verification, and
+  prove requested paths are absent without changing the source.
+- State macOS Tahoe 26 as Warrior's sole supported platform.
+
 ## 0.1.0 — 2026-08-24
 
 Initial release of Warrior's preservation-first Git tooling and portable

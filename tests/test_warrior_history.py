@@ -189,6 +189,133 @@ class HistoryAssessmentCliTest(unittest.TestCase):
             self.assertEqual(report["artifacts"][0]["presence"], "current")
 
 
+class HistoryRewriteCandidateCliTest(unittest.TestCase):
+    def test_removes_an_exact_path_only_in_a_new_verified_candidate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            candidate = root / "candidate.git"
+            plan = root / "rewrite-plan.json"
+            source.mkdir()
+            run_git(source, "init", "-b", "main")
+            (source / "keep.txt").write_text("keep forever\n")
+            (source / "accidental.zip").write_bytes(b"PK\x03\x04remove me")
+            run_git(source, "add", "keep.txt", "accidental.zip")
+            run_git(source, "commit", "-m", "add source and accidental archive")
+            (source / "later.txt").write_text("later\n")
+            run_git(source, "add", "later.txt")
+            run_git(source, "commit", "-m", "keep later history")
+            source_head = subprocess.run(
+                ["git", "-C", str(source), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+
+            planned = run_history(
+                "plan", str(source), "--remove-path", "accidental.zip",
+                "--output", str(plan), "--json",
+            )
+            self.assertEqual(planned.returncode, 0, planned.stderr)
+            self.assertEqual(json.loads(plan.read_text())["source_head"], source_head)
+
+            built = run_history(
+                "build-candidate", "--plan", str(plan),
+                "--destination", str(candidate), "--json",
+            )
+
+            self.assertEqual(built.returncode, 0, built.stderr)
+            report = json.loads(built.stdout)
+            self.assertTrue(report["verification"]["source_unchanged"])
+            self.assertTrue(report["verification"]["removed_paths_absent"])
+            self.assertTrue(report["verification"]["candidate_fsck_passed"])
+            self.assertTrue(report["verification"]["candidate_has_no_remotes"])
+            source_objects = subprocess.run(
+                ["git", "-C", str(source), "rev-list", "--objects", "--all"],
+                check=True, capture_output=True, text=True,
+            ).stdout
+            candidate_objects = subprocess.run(
+                ["git", "-C", str(candidate), "rev-list", "--objects", "--all"],
+                check=True, capture_output=True, text=True,
+            ).stdout
+            self.assertIn("accidental.zip", source_objects)
+            self.assertNotIn("accidental.zip", candidate_objects)
+            self.assertIn("keep.txt", candidate_objects)
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "-C", str(source), "rev-parse", "HEAD"],
+                    check=True, capture_output=True, text=True,
+                ).stdout.strip(),
+                source_head,
+            )
+            self.assertTrue((source / "accidental.zip").is_file())
+
+    def test_refuses_a_dirty_source_before_writing_a_plan(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            plan = root / "plan.json"
+            source.mkdir()
+            run_git(source, "init", "-b", "main")
+            (source / ".env").write_text("TOKEN=secret\n")
+            run_git(source, "add", ".env")
+            run_git(source, "commit", "-m", "accidental environment")
+            (source / "uncommitted.txt").write_text("must not be omitted\n")
+
+            result = run_history(
+                "plan", str(source), "--remove-path", ".env",
+                "--output", str(plan), "--json",
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("not clean", result.stderr)
+            self.assertFalse(plan.exists())
+            self.assertTrue((source / "uncommitted.txt").is_file())
+
+    def test_refuses_source_drift_and_an_existing_candidate_destination(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            plan = root / "plan.json"
+            destination = root / "candidate.git"
+            source.mkdir()
+            run_git(source, "init", "-b", "main")
+            (source / "archive.zip").write_bytes(b"PK\x03\x04old")
+            run_git(source, "add", "archive.zip")
+            run_git(source, "commit", "-m", "old archive")
+            planned = run_history(
+                "plan", str(source), "--remove-path", "archive.zip",
+                "--output", str(plan), "--json",
+            )
+            self.assertEqual(planned.returncode, 0, planned.stderr)
+            (source / "later.txt").write_text("source advanced\n")
+            run_git(source, "add", "later.txt")
+            run_git(source, "commit", "-m", "advance after plan")
+
+            drifted = run_history(
+                "build-candidate", "--plan", str(plan),
+                "--destination", str(destination), "--json",
+            )
+            self.assertEqual(drifted.returncode, 2)
+            self.assertIn("HEAD changed", drifted.stderr)
+            self.assertFalse(destination.exists())
+
+            current_plan = root / "current-plan.json"
+            replanned = run_history(
+                "plan", str(source), "--remove-path", "archive.zip",
+                "--output", str(current_plan), "--json",
+            )
+            self.assertEqual(replanned.returncode, 0, replanned.stderr)
+            destination.mkdir()
+            marker = destination / "preserve-me.txt"
+            marker.write_text("existing work\n")
+            existing = run_history(
+                "build-candidate", "--plan", str(current_plan),
+                "--destination", str(destination), "--json",
+            )
+            self.assertEqual(existing.returncode, 2)
+            self.assertIn("already exists", existing.stderr)
+            self.assertEqual(marker.read_text(), "existing work\n")
+
+
 class ReadOnlyGuardTest(unittest.TestCase):
     def test_rejects_history_rewrite_and_fsck_recovery_writes(self):
         dangerous = [
@@ -213,6 +340,9 @@ class ReadOnlyGuardTest(unittest.TestCase):
         for path, kind in expected.items():
             with self.subTest(path=path):
                 self.assertEqual(MODULE.artifact_kind(path), kind)
+
+    def test_preserves_dotfile_identity_in_rewrite_rules(self):
+        self.assertEqual(MODULE.validate_removal_path(".env"), ".env")
 
     def test_withholds_sensitive_commit_subjects(self):
         self.assertEqual(

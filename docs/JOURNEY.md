@@ -126,10 +126,40 @@ python3 bin/warrior-history assess ~/code/my-project --large-mb 50
 ```
 
 Sensitive-looking paths and commit subjects are counted but withheld from both
-text and JSON reports. File contents are never read. This command does not scan file content
-for leaked secrets, build a rewritten clone, move refs, run garbage collection,
-or alter a remote. Those are separate future capabilities because combining
-"tell me what happened" with "rewrite it now" is not a safe interface.
+text and JSON reports. File contents are never read. This command does not scan
+file content for leaked secrets, move source refs, run garbage collection, or
+alter a remote.
+
+### Build an exact-path removal candidate
+
+Assessment and rewriting remain separate commands. First write a pinned plan:
+
+```bash
+python3 bin/warrior-history plan ~/code/my-project \
+  --remove-path old-export.zip \
+  --output ~/Desktop/my-project-rewrite-plan.json
+```
+
+The source must be clean, the named path must exist in reachable history, and
+the output file must not already exist. Review the JSON, then build a new bare
+candidate at a path that does not exist:
+
+```bash
+python3 bin/warrior-history build-candidate \
+  --plan ~/Desktop/my-project-rewrite-plan.json \
+  --destination ~/Desktop/my-project-rewritten.git
+```
+
+Warrior clones with `--mirror --no-local`, runs `git-filter-repo` only inside
+that new candidate, removes its remote, runs `git fsck`, proves the requested
+paths are absent from every reachable candidate ref, and rechecks that the
+source HEAD and refs did not move. A partial or failed candidate is preserved
+for inspection; Warrior never deletes it and never retries over it.
+
+This first rewrite surface removes exact file or directory paths. Content-level
+secret replacement, commit dropping/squashing, canonical cutover, and any push
+remain separate future capabilities. The candidate is evidence to inspect, not
+permission to replace a repository.
 
 ## Chapter 2¾ — Know what came from upstream
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explain repository-history risks without changing the repository."""
+"""Assess history and build isolated rewrite candidates without changing the source."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -64,6 +65,8 @@ SENSITIVE_SUBJECT = re.compile(
     r"\b(password|passwd|secret|token|credential|api[-_ ]?key|private key)\b",
     re.IGNORECASE,
 )
+APPLE_GIT = "/usr/bin/git"
+SAFE_MACOS_PATH = "/usr/bin:/usr/local/bin:/opt/homebrew/bin"
 
 
 def assert_read_only(args: tuple[str, ...]) -> None:
@@ -81,6 +84,10 @@ def assert_read_only(args: tuple[str, ...]) -> None:
         "rev-list": {
             ("--objects", "--all"), ("--max-parents=0", "--all"),
             ("--all", "--count"),
+        },
+        "status": {("--porcelain=v1", "--untracked-files=all")},
+        "for-each-ref": {
+            ("--format=%(refname)%00%(objectname)",),
         },
         "cat-file": {("--batch-check=%(objectname) %(objecttype) %(objectsize)",)},
         "fsck": {("--unreachable", "--no-reflogs", "--no-progress")},
@@ -104,7 +111,7 @@ def git(repo: Path, *args: str, input_text: Optional[str] = None) -> tuple[int, 
     environment.setdefault("GIT_TERMINAL_PROMPT", "0")
     try:
         process = subprocess.run(
-            ["git", "--no-optional-locks", "-c", "core.fsmonitor=", "-C", str(repo), *args],
+            [APPLE_GIT, "--no-optional-locks", "-c", "core.fsmonitor=", "-C", str(repo), *args],
             input=input_text,
             capture_output=True,
             text=True,
@@ -326,6 +333,202 @@ def assess(repo: Path, large_bytes: int = 10 * 1024 * 1024) -> dict[str, Any]:
     }
 
 
+def source_refs(repo: Path) -> dict[str, str]:
+    code, output, error = git(
+        repo, "for-each-ref", "--format=%(refname)%00%(objectname)",
+    )
+    if code != 0:
+        raise ValueError(error or "could not read source refs")
+    refs: dict[str, str] = {}
+    for line in output.splitlines():
+        name, separator, object_id = line.partition("\0")
+        if separator:
+            refs[name] = object_id
+    return refs
+
+
+def validate_removal_path(value: str) -> str:
+    path = Path(value)
+    if not value or path.is_absolute() or ".." in path.parts or ".git" in path.parts:
+        raise ValueError(f"remove paths must be safe repository-relative paths: {value!r}")
+    return path.as_posix()
+
+
+def source_history_paths(repo: Path) -> set[str]:
+    code, output, error = git(repo, "rev-list", "--objects", "--all")
+    if code != 0:
+        raise ValueError(error or "could not enumerate source history")
+    return {
+        line.partition(" ")[2]
+        for line in output.splitlines()
+        if line.partition(" ")[1]
+    }
+
+
+def assert_clean_source(repo: Path) -> None:
+    code, output, error = git(repo, "status", "--porcelain=v1", "--untracked-files=all")
+    if code != 0:
+        raise ValueError(error or "could not inspect source working tree")
+    if output:
+        raise ValueError("source working tree is not clean; candidate would omit uncommitted work")
+
+
+def safe_plan_output(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if resolved.suffix != ".json" or resolved.name.startswith("."):
+        raise ValueError("rewrite plan output must be a visible .json file")
+    if not resolved.parent.is_dir():
+        raise ValueError("rewrite plan parent directory does not exist")
+    if ".git" in resolved.parts:
+        raise ValueError("refusing to write a rewrite plan inside Git metadata")
+    if resolved.exists():
+        raise ValueError("rewrite plan output already exists; refusing to overwrite it")
+    return resolved
+
+
+def create_rewrite_plan(repo: Path, remove_paths: list[str], output: Path) -> dict[str, Any]:
+    repo = repo.expanduser().resolve()
+    repository = assess(repo, large_bytes=10 * 1024 * 1024)
+    if repository["repository_kind"] != "working-tree":
+        raise ValueError("rewrite planning currently requires a working-tree repository")
+    assert_clean_source(repo)
+    paths = sorted({validate_removal_path(item) for item in remove_paths})
+    if not paths:
+        raise ValueError("at least one --remove-path is required")
+    historical = source_history_paths(repo)
+    missing = [
+        path for path in paths
+        if not any(candidate == path or candidate.startswith(path.rstrip("/") + "/") for candidate in historical)
+    ]
+    if missing:
+        raise ValueError("one or more remove paths do not exist in reachable source history")
+    plan = {
+        "schema_version": 1,
+        "operation": "remove-paths-from-candidate-history",
+        "source_repository": str(repo),
+        "source_head": repository["head"],
+        "source_refs": source_refs(repo),
+        "remove_paths": paths,
+        "safety": {
+            "source_is_never_rewritten": True,
+            "destination_must_not_exist": True,
+            "candidate_requires_verification": True,
+        },
+    }
+    destination = safe_plan_output(output)
+    if repo == destination or repo in destination.parents:
+        raise ValueError("rewrite plan output must be outside the source repository")
+    destination.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+    return plan
+
+
+def run_process(
+    args: list[str], timeout: int = 300, cwd: Optional[Path] = None
+) -> subprocess.CompletedProcess[str]:
+    environment = dict(os.environ)
+    environment.setdefault("GIT_TERMINAL_PROMPT", "0")
+    environment["PATH"] = SAFE_MACOS_PATH
+    return subprocess.run(
+        args, capture_output=True, text=True, errors="replace", check=False,
+        timeout=timeout, env=environment, cwd=str(cwd) if cwd else None,
+    )
+
+
+def load_rewrite_plan(path: Path) -> dict[str, Any]:
+    try:
+        plan = json.loads(path.expanduser().read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"could not read rewrite plan: {error}") from error
+    if plan.get("schema_version") != 1 or plan.get("operation") != "remove-paths-from-candidate-history":
+        raise ValueError("unsupported rewrite plan")
+    return plan
+
+
+def build_candidate(plan_path: Path, destination: Path) -> dict[str, Any]:
+    plan = load_rewrite_plan(plan_path)
+    source = Path(plan["source_repository"]).expanduser().resolve()
+    destination = destination.expanduser().resolve()
+    if destination.exists():
+        raise ValueError("candidate destination already exists; refusing to overwrite it")
+    if not destination.parent.is_dir():
+        raise ValueError("candidate parent directory does not exist")
+    if ".git" in destination.parts:
+        raise ValueError("candidate destination must not be inside Git metadata")
+    if destination == source or source in destination.parents:
+        raise ValueError("candidate destination must be outside the source repository")
+    assert_clean_source(source)
+    current_head_code, current_head, head_error = git(source, "rev-parse", "HEAD")
+    if current_head_code != 0 or current_head.strip() != plan.get("source_head"):
+        raise ValueError(head_error or "source HEAD changed after the rewrite plan was created")
+    if source_refs(source) != plan.get("source_refs"):
+        raise ValueError("source refs changed after the rewrite plan was created")
+    filter_repo = shutil.which("git-filter-repo")
+    if not filter_repo:
+        raise ValueError("git-filter-repo is required (install it with Homebrew)")
+    filter_entrypoint = Path(filter_repo)
+    if filter_entrypoint.parent not in {Path("/usr/local/bin"), Path("/opt/homebrew/bin")}:
+        raise ValueError("git-filter-repo must be installed in a Homebrew binary directory")
+
+    cloned = run_process([
+        APPLE_GIT, "clone", "--mirror", "--no-local", "--", str(source), str(destination)
+    ])
+    if cloned.returncode != 0:
+        raise ValueError(f"candidate clone failed; preserved partial destination: {cloned.stderr.strip()}")
+    disconnected = run_process([
+        APPLE_GIT, "--git-dir", str(destination), "remote", "remove", "origin"
+    ])
+    if disconnected.returncode != 0:
+        raise ValueError("candidate could not be disconnected; preserved for inspection")
+    filter_args = [filter_repo, "--force"]
+    for path in plan["remove_paths"]:
+        filter_args.extend(["--path", validate_removal_path(path)])
+    filter_args.append("--invert-paths")
+    rewritten = run_process(filter_args, timeout=900, cwd=destination)
+    if rewritten.returncode != 0:
+        raise ValueError("candidate rewrite failed; preserved candidate for inspection")
+
+    candidate_objects = run_process([
+        APPLE_GIT, "--git-dir", str(destination), "rev-list", "--objects", "--all"
+    ])
+    if candidate_objects.returncode != 0:
+        raise ValueError("could not verify candidate history")
+    object_paths = {
+        line.partition(" ")[2]
+        for line in candidate_objects.stdout.splitlines()
+        if line.partition(" ")[1]
+    }
+    removed_absent = all(
+        not any(item == path or item.startswith(path.rstrip("/") + "/") for item in object_paths)
+        for path in plan["remove_paths"]
+    )
+    checked = run_process([APPLE_GIT, "--git-dir", str(destination), "fsck", "--full"])
+    candidate_remotes = run_process([
+        APPLE_GIT, "--git-dir", str(destination), "remote"
+    ])
+    source_unchanged = (
+        git(source, "rev-parse", "HEAD")[1].strip() == plan["source_head"]
+        and source_refs(source) == plan["source_refs"]
+    )
+    verification = {
+        "source_unchanged": source_unchanged,
+        "removed_paths_absent": removed_absent,
+        "candidate_fsck_passed": checked.returncode == 0,
+        "candidate_has_no_remotes": (
+            candidate_remotes.returncode == 0 and not candidate_remotes.stdout.strip()
+        ),
+    }
+    if not all(verification.values()):
+        raise ValueError("candidate verification failed; candidate preserved for inspection")
+    return {
+        "mode": "candidate-only-history-rewrite",
+        "source_repository": str(source),
+        "candidate_repository": str(destination),
+        "remove_path_count": len(plan["remove_paths"]),
+        "verification": verification,
+        "next_step": "Inspect and compare the candidate. No remote was changed.",
+    }
+
+
 def render(report: dict[str, Any]) -> str:
     lines = ["Warrior History: read-only assessment", f"repository  {report['repository']}"]
     lines.append(f"HEAD        {report['branch'] or '(detached)'} {report['head'] or '(unknown)'}")
@@ -375,20 +578,44 @@ def main() -> int:
         help="large-blob threshold in MiB (default: 10)",
     )
     assess_parser.add_argument("--large-bytes", type=int, help=argparse.SUPPRESS)
+    plan_parser = subparsers.add_parser("plan", help="write an exact candidate rewrite plan")
+    plan_parser.add_argument("repository", type=Path)
+    plan_parser.add_argument("--remove-path", action="append", default=[])
+    plan_parser.add_argument("--output", type=Path, required=True)
+    plan_parser.add_argument("--json", action="store_true")
+    build_parser = subparsers.add_parser(
+        "build-candidate", help="rewrite a new bare candidate; never the source"
+    )
+    build_parser.add_argument("--plan", type=Path, required=True)
+    build_parser.add_argument("--destination", type=Path, required=True)
+    build_parser.add_argument("--json", action="store_true")
     arguments = parser.parse_args()
     try:
-        large_bytes = (
-            arguments.large_bytes
-            if arguments.large_bytes is not None
-            else int(arguments.large_mb * 1024 * 1024)
-        )
-        if large_bytes < 0:
-            raise ValueError("the large-blob threshold must be zero or greater")
-        report = assess(arguments.repository.expanduser().resolve(), large_bytes)
+        if arguments.command == "assess":
+            large_bytes = (
+                arguments.large_bytes
+                if arguments.large_bytes is not None
+                else int(arguments.large_mb * 1024 * 1024)
+            )
+            if large_bytes < 0:
+                raise ValueError("the large-blob threshold must be zero or greater")
+            report = assess(arguments.repository.expanduser().resolve(), large_bytes)
+            text_output = render(report)
+        elif arguments.command == "plan":
+            report = create_rewrite_plan(
+                arguments.repository, arguments.remove_path, arguments.output
+            )
+            text_output = f"Rewrite plan written to {arguments.output}. Source was not changed."
+        else:
+            report = build_candidate(arguments.plan, arguments.destination)
+            text_output = (
+                f"Verified candidate written to {report['candidate_repository']}. "
+                "Source and remotes were not changed."
+            )
     except ValueError as error:
         print(f"warrior-history: {error}", file=sys.stderr)
         return 2
-    print(json.dumps(report, indent=2, sort_keys=True) if arguments.json else render(report))
+    print(json.dumps(report, indent=2, sort_keys=True) if arguments.json else text_output)
     return 0
 
 
