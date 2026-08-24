@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from lib.warrior_forge import UnsafeGitCommand, assert_safe_git
+
 
 SCRIPT = Path(__file__).parents[1] / "bin" / "warrior-project"
 
@@ -66,6 +68,11 @@ def dossier(*roots: Path) -> subprocess.CompletedProcess[str]:
 
 
 class ProjectDossierCliTest(unittest.TestCase):
+    def test_git_guard_allows_only_plain_blob_reads_for_cat_file(self) -> None:
+        assert_safe_git(("cat-file", "blob", "refs/tags/v1.0.0:composer.json"))
+        with self.assertRaises(UnsafeGitCommand):
+            assert_safe_git(("cat-file", "--filters", "refs/tags/v1.0.0:composer.json"))
+
     def test_discovers_source_and_agent_state_but_prunes_dependency_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "package"
@@ -133,6 +140,31 @@ class ProjectDossierCliTest(unittest.TestCase):
                 package["tagged_releases"],
                 [{"version": "v1.4.0", "ref": "refs/tags/v1.4.0"}],
             )
+
+    def test_tag_for_pre_fork_package_identity_does_not_release_current_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "renamed-fork"
+            initialise(root, "upstream/original", None)
+            git(root, "tag", "v1.4.0")
+            (root / "composer.json").write_text(json.dumps({
+                "name": "dean/renamed-fork",
+                "type": "library",
+            }) + "\n")
+            git(root, "add", "composer.json")
+            git(root, "commit", "-q", "-m", "rename package")
+
+            result = dossier(root)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            package = json.loads(result.stdout)["repositories"][0]["composer"]
+            self.assertFalse(package["publishable"])
+            self.assertEqual(package["version_candidates"], [])
+            self.assertEqual(package["tagged_releases"], [])
+            self.assertEqual(package["historical_package_identities"], [{
+                "name": "upstream/original",
+                "version": "v1.4.0",
+                "ref": "refs/tags/v1.4.0",
+            }])
 
     def test_duplicate_composer_identities_are_reported_at_estate_level(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

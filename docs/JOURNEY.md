@@ -203,7 +203,9 @@ warrior-project dossier ~/code/packages --json
 `warrior-project` discovers independent Git boundaries while pruning dependency
 and build trees. It records root commits, current refs, dirty state and redacted
 remotes. For Composer packages it accepts only versions declared in the
-manifest or proven by semantic-version tags anywhere in history. Placeholder
+manifest or proven by semantic-version tags whose own manifest has the same
+package identity. Tags from a pre-fork or pre-rename identity are reported as
+lineage evidence, never borrowed as releases of the current package. Placeholder
 names, applications/metapackages, repositories with no commit, packages with no
 evidence-backed version, and duplicate package identities remain explicit
 blockers. The command is read-only: it does not create a repository, add a

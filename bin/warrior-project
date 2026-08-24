@@ -131,6 +131,7 @@ def composer_record(repo: Path) -> dict[str, Any] | None:
         if VERSION.fullmatch(tag)
     ]
     tagged_releases: list[dict[str, str]] = []
+    historical_package_identities: list[dict[str, str]] = []
     for ref in git_value(
         repo,
         "for-each-ref",
@@ -140,7 +141,16 @@ def composer_record(repo: Path) -> dict[str, Any] | None:
     ).splitlines():
         version = ref.removeprefix("refs/tags/")
         if VERSION.fullmatch(version):
-            tagged_releases.append({"version": version, "ref": ref})
+            try:
+                tagged_manifest = json.loads(git_value(repo, "cat-file", "blob", f"{ref}:composer.json"))
+            except (TypeError, ValueError):
+                tagged_manifest = {}
+            tagged_name = tagged_manifest.get("name") if isinstance(tagged_manifest, dict) else None
+            release = {"version": version, "ref": ref}
+            if tagged_name == name:
+                tagged_releases.append(release)
+            elif isinstance(tagged_name, str) and PACKAGE_NAME.fullmatch(tagged_name):
+                historical_package_identities.append({"name": tagged_name, **release})
     versions: list[str] = []
     if declared and VERSION.fullmatch(declared):
         versions.append(declared)
@@ -167,6 +177,7 @@ def composer_record(repo: Path) -> dict[str, Any] | None:
         "declared_version": declared or None,
         "tags_at_head": tags_at_head,
         "tagged_releases": tagged_releases,
+        "historical_package_identities": historical_package_identities,
         "version_candidates": versions,
         "repositories": composer_repositories(manifest.get("repositories")),
         "publishable": not blockers,

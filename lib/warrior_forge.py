@@ -441,7 +441,7 @@ def validate_ssh_transport(url: str) -> str:
 
 # Allowlist, not a denylist: anything not named here cannot be run at all.
 ALLOWED_GIT = frozenset(
-    "branch config for-each-ref ls-remote push remote rev-list rev-parse "
+    "branch cat-file config for-each-ref ls-remote push remote rev-list rev-parse "
     "status symbolic-ref tag".split()
 )
 
@@ -496,6 +496,11 @@ def assert_safe_git(args: Sequence[str]) -> None:
                 raise UnsafeGitCommand(
                     f"git push: refusing refspec {argument!r}; a colon refspec can delete refs"
                 )
+        return
+
+    if subcommand == "cat-file":
+        if len(rest) != 2 or rest[0] != "blob" or rest[1].startswith("-"):
+            raise UnsafeGitCommand("git cat-file: only 'blob <object>' is allowed")
         return
 
     if subcommand == "config":
