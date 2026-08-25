@@ -82,12 +82,15 @@ email addresses. This is a heuristic release gate, not a mathematical proof
 that arbitrary prose contains no private facts.
 
 `public-plan` pins the source HEAD, every source ref, the selected branch, the
-public identity, and the SHA-256 of any private replacement file.
+public name/email identity, the explicit sole-author policy, and the SHA-256 of
+any private replacement file.
 `build-public-candidate` then:
 
 - clones only the selected branch, without tags or local hardlinks;
 - removes the candidate remote before rewriting;
-- rewrites author and committer email metadata to the chosen public address;
+- rewrites author and committer name/email metadata to the chosen public owner;
+- when `--sole-author` is explicit, strips `Co-Authored-By` trailers and proves
+  no second contributor identity remains;
 - optionally removes exact files/directories and applies replacements to blobs
   and commit messages;
 - runs `git fsck --full` and the same public audit;

@@ -22,6 +22,9 @@ All notable Warrior releases are recorded here.
   with single-branch export, metadata anonymisation, exact file/directory
   removal, private replacement-rule digests, full object verification, and a
   mandatory post-rewrite audit.
+- Add an explicit sole-author projection policy that attributes every public
+  commit to its declared owner and removes AI co-author trailers without
+  changing private source history.
 
 ## 0.1.0 — 2026-08-24
 

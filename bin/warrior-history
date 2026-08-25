@@ -580,10 +580,20 @@ def validate_public_email(value: str) -> str:
     return value
 
 
+def validate_public_name(value: str) -> str:
+    if not value.strip() or value != value.strip() or len(value) > 100:
+        raise ValueError("--public-name must be a non-empty trimmed name")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("--public-name must not contain control characters")
+    return value
+
+
 def create_public_plan(
     repo: Path,
     selected_ref: str,
+    public_name: str,
     public_email: str,
+    sole_author: bool,
     remove_paths: list[str],
     replace_text: Optional[Path],
     output: Path,
@@ -626,7 +636,9 @@ def create_public_plan(
         "source_refs": source_refs(repo),
         "selected_ref": refname,
         "selected_object": ref_object,
+        "public_name": validate_public_name(public_name),
         "public_email": validate_public_email(public_email),
+        "sole_author": bool(sole_author),
         "remove_paths": paths,
         "replacement_rules": replacement_record,
         "safety": {
@@ -718,10 +730,19 @@ def build_public_candidate(plan_path: Path, destination: Path) -> dict[str, Any]
     if disconnected.returncode != 0:
         raise ValueError("public candidate could not be disconnected; preserved for inspection")
     email = validate_public_email(plan["public_email"])
+    name = validate_public_name(plan["public_name"])
     callback = (
+        f"commit.author_name = {name.encode()!r}\n"
+        f"commit.committer_name = {name.encode()!r}\n"
         f"commit.author_email = {email.encode()!r}\n"
         f"commit.committer_email = {email.encode()!r}"
     )
+    if plan.get("sole_author"):
+        callback += (
+            "\ncommit.message = b'\\n'.join("
+            "line for line in commit.message.split(b'\\n') "
+            "if not line.lower().startswith(b'co-authored-by:'))"
+        )
     filter_args = [filter_repo, "--force", "--commit-callback", callback]
     for path in plan["remove_paths"]:
         filter_args.extend(["--path", validate_removal_path(path)])
@@ -739,6 +760,18 @@ def build_public_candidate(plan_path: Path, destination: Path) -> dict[str, Any]
     checked = run_process([APPLE_GIT, "--git-dir", str(destination), "fsck", "--full"])
     remotes = run_process([APPLE_GIT, "--git-dir", str(destination), "remote"])
     audit = public_audit(destination, branch, [email])
+    identity = git_public_read(destination, "log", "--format=%an%x00%cn%x00", refname)
+    messages = git_public_read(destination, "log", "--format=%B", refname)
+    expected_name = name.encode()
+    identity_parts = (
+        [part.strip() for part in identity.stdout.split(b"\x00") if part.strip()]
+        if identity.returncode == 0 else []
+    )
+    names_match = bool(identity_parts) and all(part == expected_name for part in identity_parts)
+    no_coauthors = (
+        messages.returncode == 0
+        and b"co-authored-by:" not in messages.stdout.lower()
+    )
     verification = {
         "source_unchanged": (
             git(source, "rev-parse", "HEAD")[1].strip() == plan["source_head"]
@@ -748,6 +781,9 @@ def build_public_candidate(plan_path: Path, destination: Path) -> dict[str, Any]
         "candidate_fsck_passed": checked.returncode == 0,
         "candidate_has_no_remotes": remotes.returncode == 0 and not remotes.stdout.strip(),
         "public_audit_passed": audit["safe_for_publication"],
+        "sole_author_identity": (
+            names_match and no_coauthors if plan.get("sole_author") else names_match
+        ),
     }
     if not all(verification.values()):
         raise ValueError("public candidate verification failed; candidate preserved for inspection")
@@ -913,7 +949,12 @@ def main() -> int:
     )
     public_plan_parser.add_argument("repository", type=Path)
     public_plan_parser.add_argument("--ref", required=True)
+    public_plan_parser.add_argument("--public-name", required=True)
     public_plan_parser.add_argument("--public-email", required=True)
+    public_plan_parser.add_argument(
+        "--sole-author", action="store_true",
+        help="attribute every commit to the public owner and strip co-author trailers",
+    )
     public_plan_parser.add_argument("--remove-path", action="append", default=[])
     public_plan_parser.add_argument("--replace-text", type=Path)
     public_plan_parser.add_argument("--output", type=Path, required=True)
@@ -953,8 +994,9 @@ def main() -> int:
             )
         elif arguments.command == "public-plan":
             report = create_public_plan(
-                arguments.repository, arguments.ref, arguments.public_email,
-                arguments.remove_path, arguments.replace_text, arguments.output,
+                arguments.repository, arguments.ref, arguments.public_name,
+                arguments.public_email, arguments.sole_author, arguments.remove_path,
+                arguments.replace_text, arguments.output,
             )
             text_output = f"Public projection plan written to {arguments.output}. Source was not changed."
         elif arguments.command == "plan":

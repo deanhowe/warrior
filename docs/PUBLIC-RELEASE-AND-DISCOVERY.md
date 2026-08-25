@@ -8,8 +8,9 @@ a reviewed projection, not a second place to edit history independently.
 Release completion means all of these are true:
 
 1. `warrior-scan --fsck` records no unclassified work-loss blocker.
-2. `warrior-history public-plan` pins one source branch and a public noreply
-   identity.
+2. `warrior-history public-plan` pins one source branch and the intended public
+   name/noreply identity. Releases owned solely by the developer use the
+   explicit `--sole-author` policy.
 3. `build-public-candidate` exports only that branch and passes `fsck` plus its
    value-withholding public audit.
 4. The candidate's current tree passes the deterministic test suite.

@@ -265,7 +265,10 @@ class HistoryRewriteCandidateCliTest(unittest.TestCase):
             private_token = "ghp" + "_abcdefghijklmnopqrstuvwxyz1234567890"
             (source / "README.md").write_text(f"path={private_path}\ntoken={private_token}\n")
             run_git(source, "add", "README.md")
-            run_git(source, "commit", "-m", "initial source")
+            run_git(
+                source, "commit", "-m", "initial source",
+                "-m", "Co-Authored-By: Codex <noreply@openai.com>",
+            )
             run_git(source, "switch", "-c", "private-notes")
             (source / "never-public.txt").write_text("private branch only\n")
             run_git(source, "add", "never-public.txt")
@@ -277,6 +280,7 @@ class HistoryRewriteCandidateCliTest(unittest.TestCase):
 
             planned = run_history(
                 "public-plan", str(source), "--ref", "main",
+                "--public-name", "Public Owner", "--sole-author",
                 "--public-email", "owner@users.noreply.github.com",
                 "--replace-text", str(replacements), "--output", str(plan), "--json",
             )
@@ -308,6 +312,17 @@ class HistoryRewriteCandidateCliTest(unittest.TestCase):
                 check=True, capture_output=True, text=True,
             ).stdout.splitlines()
             self.assertEqual(set(emails), {"owner@users.noreply.github.com"})
+            names = subprocess.run(
+                ["git", "--git-dir", str(candidate), "log", "--format=%an%n%cn", "main"],
+                check=True, capture_output=True, text=True,
+            ).stdout.splitlines()
+            self.assertEqual(set(names), {"Public Owner"})
+            messages = subprocess.run(
+                ["git", "--git-dir", str(candidate), "log", "--format=%B", "main"],
+                check=True, capture_output=True, text=True,
+            ).stdout
+            self.assertNotIn("Co-Authored-By:", messages)
+            self.assertTrue(report["verification"]["sole_author_identity"])
 
     def test_removes_an_exact_path_only_in_a_new_verified_candidate(self):
         with tempfile.TemporaryDirectory() as temporary:
