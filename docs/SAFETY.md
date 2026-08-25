@@ -73,7 +73,7 @@ delete a source object, push rewritten history, or force-push anything.
 
 ### Public projections
 
-`warrior-history public-audit` reads every reachable blob and commit identity
+`warrior-history public-audit` reads every reachable blob, commit message, and commit identity
 on one explicitly selected local branch. It returns exit code `3` when it sees
 high-confidence token/key patterns, non-placeholder absolute user paths,
 unapproved email addresses, or unapproved commit metadata. Reports contain
@@ -88,7 +88,8 @@ public identity, and the SHA-256 of any private replacement file.
 - clones only the selected branch, without tags or local hardlinks;
 - removes the candidate remote before rewriting;
 - rewrites author and committer email metadata to the chosen public address;
-- optionally removes exact files/directories and applies content replacements;
+- optionally removes exact files/directories and applies replacements to blobs
+  and commit messages;
 - runs `git fsck --full` and the same public audit;
 - verifies the source and all its refs are unchanged.
 

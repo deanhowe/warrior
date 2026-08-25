@@ -395,6 +395,19 @@ def placeholder_user_path(value: bytes) -> bool:
     )
 
 
+def publishable_matches(category: str, data: bytes, allowed: set[bytes]) -> list[re.Match[bytes]]:
+    matches = list(PUBLIC_CONTENT_PATTERNS[category].finditer(data))
+    if category == "email-address":
+        return [
+            match for match in matches
+            if match.group(0).lower() not in allowed
+            and not reserved_example_email(match.group(0))
+        ]
+    if category == "absolute-user-path":
+        return [match for match in matches if not placeholder_user_path(match.group(0))]
+    return matches
+
+
 def public_audit(repo: Path, selected_ref: str, allowed_emails: list[str]) -> dict[str, Any]:
     repo = repo.expanduser().resolve()
     refname, ref_object = selected_public_ref(repo, selected_ref)
@@ -418,16 +431,8 @@ def public_audit(repo: Path, selected_ref: str, allowed_emails: list[str]) -> di
             continue
         seen_blobs.add(object_text)
         path = raw_path.decode("utf-8", "replace")
-        for category, pattern in PUBLIC_CONTENT_PATTERNS.items():
-            matches = list(pattern.finditer(blob.stdout))
-            if category == "email-address":
-                matches = [
-                    match for match in matches
-                    if match.group(0).lower() not in allowed
-                    and not reserved_example_email(match.group(0))
-                ]
-            elif category == "absolute-user-path":
-                matches = [match for match in matches if not placeholder_user_path(match.group(0))]
+        for category in PUBLIC_CONTENT_PATTERNS:
+            matches = publishable_matches(category, blob.stdout, allowed)
             if not matches:
                 continue
             findings[category] += len(matches)
@@ -438,6 +443,15 @@ def public_audit(repo: Path, selected_ref: str, allowed_emails: list[str]) -> di
                 location["path"] = path
                 location["path_withheld"] = False
             finding_locations.append(location)
+
+    messages = git_public_read(repo, "log", "--format=%B%x00", refname)
+    if messages.returncode != 0:
+        raise ValueError("could not inspect selected commit messages")
+    message_findings: dict[str, int] = {}
+    for category in PUBLIC_CONTENT_PATTERNS:
+        message_findings[category] = len(
+            publishable_matches(category, messages.stdout, allowed)
+        )
 
     metadata = git_public_read(repo, "log", "--format=%ae%x00%ce", refname)
     if metadata.returncode != 0:
@@ -451,7 +465,11 @@ def public_audit(repo: Path, selected_ref: str, allowed_emails: list[str]) -> di
     unapproved_metadata = metadata_emails - allowed
     count = git_public_read(repo, "rev-list", "--count", refname)
     commit_count = int(count.stdout.strip()) if count.returncode == 0 else None
-    safe = not any(findings.values()) and not unapproved_metadata
+    safe = (
+        not any(findings.values())
+        and not any(message_findings.values())
+        and not unapproved_metadata
+    )
     return {
         "mode": "read-only-public-history-audit",
         "repository": str(repo),
@@ -461,6 +479,7 @@ def public_audit(repo: Path, selected_ref: str, allowed_emails: list[str]) -> di
         "reachable_commit_count": commit_count,
         "content_blob_count": len(seen_blobs),
         "findings_by_category": findings,
+        "commit_message_findings_by_category": message_findings,
         "finding_locations": finding_locations,
         "commit_metadata_email_count": len(metadata_emails),
         "unapproved_commit_email_count": len(unapproved_metadata),
@@ -703,7 +722,10 @@ def build_public_candidate(plan_path: Path, destination: Path) -> dict[str, Any]
     if plan["remove_paths"]:
         filter_args.append("--invert-paths")
     if replacement is not None:
-        filter_args.extend(["--replace-text", str(replacement)])
+        filter_args.extend([
+            "--replace-text", str(replacement),
+            "--replace-message", str(replacement),
+        ])
     rewritten = run_process(filter_args, timeout=900, cwd=destination)
     if rewritten.returncode != 0:
         raise ValueError("public candidate rewrite failed; candidate preserved for inspection")

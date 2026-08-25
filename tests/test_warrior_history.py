@@ -202,7 +202,10 @@ class PublicHistoryAuditCliTest(unittest.TestCase):
                 f"contact={private_email}\nroot={private_path}\ntoken={private_token}\n"
             )
             run_git(repo, "add", "notes.txt")
-            run_git(repo, "commit", "-m", "accidental private material")
+            run_git(
+                repo, "commit", "-m", "accidental private material",
+                "-m", f"Private contact: {private_email}",
+            )
             (repo / "notes.txt").write_text("public replacement\n")
             run_git(repo, "add", "notes.txt")
             run_git(repo, "commit", "-m", "remove private material from current tree")
@@ -219,6 +222,7 @@ class PublicHistoryAuditCliTest(unittest.TestCase):
             self.assertEqual(report["findings_by_category"]["email-address"], 1)
             self.assertEqual(report["findings_by_category"]["absolute-user-path"], 1)
             self.assertEqual(report["findings_by_category"]["github-token"], 1)
+            self.assertGreaterEqual(report["commit_message_findings_by_category"]["email-address"], 1)
             self.assertGreaterEqual(report["commit_metadata_email_count"], 1)
 
     def test_accepts_a_clean_selected_ref_and_ignores_an_unselected_private_branch(self):
