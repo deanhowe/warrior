@@ -268,6 +268,7 @@ class HistoryRewriteCandidateCliTest(unittest.TestCase):
             run_git(
                 source, "commit", "-m", "initial source",
                 "-m", "Co-Authored-By: Codex <noreply@openai.com>",
+                "-m", "Body text\\n\\nCo-Authored-By: Claude <noreply@anthropic.com>",
             )
             run_git(source, "switch", "-c", "private-notes")
             (source / "never-public.txt").write_text("private branch only\n")

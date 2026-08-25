@@ -742,6 +742,8 @@ def build_public_candidate(plan_path: Path, destination: Path) -> dict[str, Any]
             "\ncommit.message = b'\\n'.join("
             "line for line in commit.message.split(b'\\n') "
             "if not line.lower().startswith(b'co-authored-by:'))"
+            "\ncommit.message = commit.message.split("
+            "b'\\\\n\\\\nCo-Authored-By:', 1)[0]"
         )
     filter_args = [filter_repo, "--force", "--commit-callback", callback]
     for path in plan["remove_paths"]:
@@ -786,7 +788,10 @@ def build_public_candidate(plan_path: Path, destination: Path) -> dict[str, Any]
         ),
     }
     if not all(verification.values()):
-        raise ValueError("public candidate verification failed; candidate preserved for inspection")
+        failed = ", ".join(name for name, passed in verification.items() if not passed)
+        raise ValueError(
+            f"public candidate verification failed ({failed}); candidate preserved for inspection"
+        )
     return {
         "mode": "public-projection-candidate",
         "source_repository": str(source),
