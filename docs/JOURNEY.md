@@ -180,6 +180,7 @@ warrior-history public-plan ~/code/my-project \
   --ref main \
   --public-name "Public Owner" \
   --public-email owner@users.noreply.github.com \
+  --sole-author \
   --remove-path private-directory \
   --replace-text ~/private/replacements.txt \
   --output ~/private/public-plan.json
@@ -189,16 +190,17 @@ warrior-history build-public-candidate \
   --destination ~/private/my-project-public.git
 ```
 
-When the public project should have one legal author even though the private
-history records AI or other co-authors, add `--sole-author`. This explicit
-option rewrites every author and committer name/email to the declared public
-owner and removes `Co-Authored-By` trailers in the candidate. It never changes
-the private source history.
+The attribution choice is mandatory. Use `--sole-author` when the public
+project belongs to the declared owner: it rewrites every author and committer
+name/email to that owner and removes `Co-Authored-By` trailers in the
+candidate. Use `--retain-coauthors` only when those local co-author trailers
+are deliberately part of the public release. Neither mode changes the private
+source history.
 
 The public candidate contains only `main`; other branches, tags, backup refs,
-and unrelated roots are not copied. Every historical author/committer email is
-rewritten to the declared public identity. With `--sole-author`, names and
-co-author trailers are normalised too. Warrior disconnects the candidate,
+and unrelated roots are not copied. Every historical author/committer name and
+email is rewritten to the declared public identity. With `--sole-author`,
+co-author trailers are removed too. Warrior disconnects the candidate,
 applies removals/replacements there, verifies objects, audits it again, and
 proves the source did not move. It does not add a public remote or push. Review
 the candidate and use a normal non-force push only under explicit authority.

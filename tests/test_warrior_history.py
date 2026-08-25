@@ -279,6 +279,17 @@ class HistoryRewriteCandidateCliTest(unittest.TestCase):
                 f"{private_path}==>/Users/developer/project\n{private_token}==>[REDACTED]\n"
             )
 
+            retained_plan = root / "retained-public-plan.json"
+            retained = run_history(
+                "public-plan", str(source), "--ref", "main",
+                "--public-name", "Public Owner", "--retain-coauthors",
+                "--public-email", "owner@users.noreply.github.com",
+                "--replace-text", str(replacements),
+                "--output", str(retained_plan), "--json",
+            )
+            self.assertEqual(retained.returncode, 0, retained.stderr)
+            self.assertEqual(json.loads(retained.stdout)["coauthor_policy"], "retain")
+
             planned = run_history(
                 "public-plan", str(source), "--ref", "main",
                 "--public-name", "Public Owner", "--sole-author",
@@ -286,6 +297,7 @@ class HistoryRewriteCandidateCliTest(unittest.TestCase):
                 "--replace-text", str(replacements), "--output", str(plan), "--json",
             )
             self.assertEqual(planned.returncode, 0, planned.stderr)
+            self.assertEqual(json.loads(planned.stdout)["coauthor_policy"], "strip")
             built = run_history(
                 "build-public-candidate", "--plan", str(plan),
                 "--destination", str(candidate), "--json",
@@ -323,7 +335,20 @@ class HistoryRewriteCandidateCliTest(unittest.TestCase):
                 check=True, capture_output=True, text=True,
             ).stdout
             self.assertNotIn("Co-Authored-By:", messages)
-            self.assertTrue(report["verification"]["sole_author_identity"])
+            self.assertTrue(report["verification"]["public_owner_identity"])
+            self.assertTrue(report["verification"]["coauthor_policy_applied"])
+
+    def test_public_plan_requires_an_explicit_coauthor_policy(self):
+        result = run_history(
+            "public-plan", ".", "--ref", "main",
+            "--public-name", "Public Owner",
+            "--public-email", "owner@users.noreply.github.com",
+            "--output", "unused-public-plan.json",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--sole-author", result.stderr)
+        self.assertIn("--retain-coauthors", result.stderr)
 
     def test_removes_an_exact_path_only_in_a_new_verified_candidate(self):
         with tempfile.TemporaryDirectory() as temporary:

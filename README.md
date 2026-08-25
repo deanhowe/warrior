@@ -65,7 +65,7 @@ marketplace, the same pattern upstream uses. Run
 
 Eleven tools in `bin/`, all read-only or additive:
 
-| Tool | What it does |
+| Tool&nbsp;command&nbsp;(copy/paste) | What it does |
 |---|---|
 | `warrior-scan` | Finds the eleven ways work can be invisible to git — shelves, stashes, index-only content, unreachable commits, unmirrored repos, and more |
 | `warrior-facts` | Answers questions about your machine: where is this repo, what exists under this root, what's unprotected |
@@ -188,6 +188,20 @@ a direction, not a feature.
 [mattpocock/skills](https://github.com/mattpocock/skills), MIT licensed.
 See `NOTICES/` for the full license text and provenance. Everything else is
 original work under this repo's own `LICENSE`.
+
+Git's contributor list and source provenance answer different questions.
+Matt Pocock's selected source is vendored rather than merged as reachable
+upstream commits, so GitHub does not infer him as a commit contributor. Warrior
+instead preserves the stronger evidence: copyright and licence in `NOTICES/`,
+the exact source commit and mappings in `upstreams/mattpocock-skills.json`, and
+a reproducible `warrior-upstream audit`.
+
+Private history may retain the real agent, harness, and human identities that
+performed each piece of work. A public projection must make its attribution
+policy explicit: `warrior-history public-plan --sole-author` attributes every
+public commit solely to the declared owner and removes co-author trailers;
+`--retain-coauthors` deliberately keeps those trailers. Neither mode rewrites
+the private source repository.
 
 ## Who this is for
 

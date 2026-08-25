@@ -593,11 +593,13 @@ def create_public_plan(
     selected_ref: str,
     public_name: str,
     public_email: str,
-    sole_author: bool,
+    coauthor_policy: str,
     remove_paths: list[str],
     replace_text: Optional[Path],
     output: Path,
 ) -> dict[str, Any]:
+    if coauthor_policy not in {"strip", "retain"}:
+        raise ValueError("public planning requires an explicit co-author policy")
     repo = repo.expanduser().resolve()
     repository = assess(repo, large_bytes=10 * 1024 * 1024)
     if repository["repository_kind"] != "working-tree":
@@ -629,7 +631,7 @@ def create_public_plan(
             "sha256": hashlib.sha256(replacement.read_bytes()).hexdigest(),
         }
     plan = {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "build-public-projection-candidate",
         "source_repository": str(repo),
         "source_head": repository["head"],
@@ -638,7 +640,7 @@ def create_public_plan(
         "selected_object": ref_object,
         "public_name": validate_public_name(public_name),
         "public_email": validate_public_email(public_email),
-        "sole_author": bool(sole_author),
+        "coauthor_policy": coauthor_policy,
         "remove_paths": paths,
         "replacement_rules": replacement_record,
         "safety": {
@@ -682,8 +684,10 @@ def load_public_plan(path: Path) -> dict[str, Any]:
         plan = json.loads(path.expanduser().read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"could not read public plan: {error}") from error
-    if plan.get("schema_version") != 1 or plan.get("operation") != "build-public-projection-candidate":
+    if plan.get("schema_version") != 2 or plan.get("operation") != "build-public-projection-candidate":
         raise ValueError("unsupported public projection plan")
+    if plan.get("coauthor_policy") not in {"strip", "retain"}:
+        raise ValueError("public projection plan has no explicit co-author policy; regenerate it")
     return plan
 
 
@@ -737,7 +741,7 @@ def build_public_candidate(plan_path: Path, destination: Path) -> dict[str, Any]
         f"commit.author_email = {email.encode()!r}\n"
         f"commit.committer_email = {email.encode()!r}"
     )
-    if plan.get("sole_author"):
+    if plan["coauthor_policy"] == "strip":
         callback += (
             "\ncommit.message = b'\\n'.join("
             "line for line in commit.message.split(b'\\n') "
@@ -783,8 +787,9 @@ def build_public_candidate(plan_path: Path, destination: Path) -> dict[str, Any]
         "candidate_fsck_passed": checked.returncode == 0,
         "candidate_has_no_remotes": remotes.returncode == 0 and not remotes.stdout.strip(),
         "public_audit_passed": audit["safe_for_publication"],
-        "sole_author_identity": (
-            names_match and no_coauthors if plan.get("sole_author") else names_match
+        "public_owner_identity": names_match,
+        "coauthor_policy_applied": (
+            no_coauthors if plan["coauthor_policy"] == "strip" else True
         ),
     }
     if not all(verification.values()):
@@ -956,9 +961,14 @@ def main() -> int:
     public_plan_parser.add_argument("--ref", required=True)
     public_plan_parser.add_argument("--public-name", required=True)
     public_plan_parser.add_argument("--public-email", required=True)
-    public_plan_parser.add_argument(
+    attribution_group = public_plan_parser.add_mutually_exclusive_group(required=True)
+    attribution_group.add_argument(
         "--sole-author", action="store_true",
         help="attribute every commit to the public owner and strip co-author trailers",
+    )
+    attribution_group.add_argument(
+        "--retain-coauthors", action="store_true",
+        help="attribute commits to the public owner but retain explicit co-author trailers",
     )
     public_plan_parser.add_argument("--remove-path", action="append", default=[])
     public_plan_parser.add_argument("--replace-text", type=Path)
@@ -1000,7 +1010,9 @@ def main() -> int:
         elif arguments.command == "public-plan":
             report = create_public_plan(
                 arguments.repository, arguments.ref, arguments.public_name,
-                arguments.public_email, arguments.sole_author, arguments.remove_path,
+                arguments.public_email,
+                "strip" if arguments.sole_author else "retain",
+                arguments.remove_path,
                 arguments.replace_text, arguments.output,
             )
             text_output = f"Public projection plan written to {arguments.output}. Source was not changed."

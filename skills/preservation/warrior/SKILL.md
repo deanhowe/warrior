@@ -27,7 +27,10 @@ guided path — this file is the terse operating summary.
 5. Before publishing a repository, run `warrior-history public-audit` on the
    exact branch. If history needs changing, use `public-plan` and
    `build-public-candidate`; publish the verified candidate, never rewrite the
-   private source in place.
+   private source in place. Choose attribution explicitly: `--sole-author`
+   makes the public projection belong only to its declared owner while local
+   identities remain private; `--retain-coauthors` deliberately publishes the
+   co-author trailers. Never choose the latter by omission or inference.
 6. Only after nothing is at risk: `warrior-facts` to orient on the estate,
    `warrior-protect` to give unprotected repos a home, `warrior-classify` to
    record what each repository is for.
