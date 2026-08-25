@@ -380,8 +380,11 @@ def git_public_read(repo: Path, *args: str, timeout: int = 300) -> subprocess.Co
 def reserved_example_email(value: bytes) -> bool:
     local, domain = value.lower().rsplit(b"@", 1)
     return (
-        local == b"git"
-        or domain in {b"example.com", b"example.net", b"example.org"}
+        local in {b"git", b"noreply", b"codex"}
+        or domain in {
+            b"example.com", b"example.net", b"example.org",
+            b"github.com", b"users.noreply.github.com",
+        }
         or domain.endswith((b".example.com", b".example.net", b".example.org"))
         or domain.endswith((b".invalid", b".example", b".test"))
     )
@@ -391,7 +394,10 @@ def placeholder_user_path(value: bytes) -> bool:
     lowered = value.lower().replace(b"\\", b"/")
     return any(
         marker in lowered
-        for marker in (b"/users/developer/", b"/users/example/", b"/home/developer/", b"/home/example/")
+        for marker in (
+            b"/users/developer/", b"/users/example/",
+            b"/home/developer/", b"/home/example/", b"/home/x/",
+        )
     )
 
 
