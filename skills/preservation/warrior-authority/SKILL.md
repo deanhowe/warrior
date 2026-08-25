@@ -163,7 +163,7 @@ strings someone typed — a prior tool, an earlier session, a copy-paste. They
 can be wrong and still look completely plausible. The only fact that can't
 be faked is shared history.
 
-Before trusting a `moof`/origin-equivalent remote you didn't just set
+Before trusting a private-forge/origin-equivalent remote you didn't just set
 yourself — and *always* before pointing it at something new — verify by
 root commit, not name:
 

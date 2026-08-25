@@ -81,12 +81,6 @@ CONFIDENCES = {"high", "medium", "low", "none"}
 # Topics must be lowercase alphanumeric with hyphens, <= 35 characters.
 TOPIC_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,34}$")
 
-DEFAULT_IDENTITY_QUERY = (
-    "SELECT path, kironexus_status FROM project_metadata "
-    "WHERE kironexus_status IS NOT NULL AND kironexus_status <> ''"
-)
-
-
 # ---------------------------------------------------------------------------
 # Rules - every machine-specific judgement lives in configuration, not in code
 # ---------------------------------------------------------------------------
@@ -375,7 +369,12 @@ def identity_index(settings: Settings, scan_root: Path | None,
 
     db_path = settings.get("identity_db")
     if db_path and Path(db_path).expanduser().exists():
-        query = settings.get("identity_query") or DEFAULT_IDENTITY_QUERY
+        query = settings.get("identity_query")
+        if not query:
+            raise ConfigError(
+                "identity_db requires an explicit identity_query returning (path, status); "
+                "Warrior does not assume a private database schema"
+            )
         connection = sqlite3.connect(f"file:{Path(db_path).expanduser()}?mode=ro", uri=True)
         try:
             for path, status in connection.execute(query).fetchall():
