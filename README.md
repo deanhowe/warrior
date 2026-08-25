@@ -34,7 +34,7 @@ losing anything is worthless if what you keep was never any good.
 Read-only, no configuration required, no network access:
 
 ```bash
-git clone <this-repo>
+git clone git@github.com:deanhowe/warrior.git
 cd warrior
 warrior-scan ~/code
 ```
@@ -51,7 +51,7 @@ INFO      — structural: understand it before you move or clean anything
 ## Install as a Claude Code plugin
 
 ```
-/plugin marketplace add <this-repo>
+/plugin marketplace add git@github.com:deanhowe/warrior.git
 /plugin install warrior
 ```
 
