@@ -38,9 +38,12 @@ Eleven tools, each read-only or additive, each with real tests:
   per repository. It withholds sensitive names and does not create checkpoints,
   repositories, packages, remotes, commits, or pushes.
 
-Exact-path history removal into a new, disconnected, verified candidate is
-shipped. Content-level secret replacement, commit surgery, canonical cutover,
-and rewritten-history pushes are deliberately not shipped. Upstream
+Exact file/directory history removal into a new, disconnected, verified
+candidate is shipped. So are a one-branch public-history audit and a public
+projection builder: it can rewrite identity metadata, apply a private
+`git-filter-repo` replacement file, exclude every unselected ref, and fail
+closed unless the result passes the same audit. Canonical cutover, commit
+surgery, and pushes remain explicit human operations. Upstream
 refresh/candidate generation is also not shipped.
 
 This chapter is real. It has been run against 415 repositories on a live

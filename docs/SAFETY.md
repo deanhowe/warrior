@@ -71,6 +71,31 @@ that must not exist. It never invokes `git-filter-repo` in the source:
 The command does not replace a canonical repository, change a source ref,
 delete a source object, push rewritten history, or force-push anything.
 
+### Public projections
+
+`warrior-history public-audit` reads every reachable blob and commit identity
+on one explicitly selected local branch. It returns exit code `3` when it sees
+high-confidence token/key patterns, non-placeholder absolute user paths,
+unapproved email addresses, or unapproved commit metadata. Reports contain
+categories, counts, object IDs, and non-sensitive paths—not matched values or
+email addresses. This is a heuristic release gate, not a mathematical proof
+that arbitrary prose contains no private facts.
+
+`public-plan` pins the source HEAD, every source ref, the selected branch, the
+public identity, and the SHA-256 of any private replacement file.
+`build-public-candidate` then:
+
+- clones only the selected branch, without tags or local hardlinks;
+- removes the candidate remote before rewriting;
+- rewrites author and committer email metadata to the chosen public address;
+- optionally removes exact files/directories and applies content replacements;
+- runs `git fsck --full` and the same public audit;
+- verifies the source and all its refs are unchanged.
+
+Replacement values stay in the caller-owned file outside the source; the plan
+stores only its path and digest. The builder never pushes. A partial candidate
+is retained for inspection.
+
 ## Pre-push preservation hook
 
 `hooks/pre-push-preservation` blocks deletion, tag replacement and

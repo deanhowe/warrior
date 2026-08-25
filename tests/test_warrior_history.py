@@ -189,7 +189,122 @@ class HistoryAssessmentCliTest(unittest.TestCase):
             self.assertEqual(report["artifacts"][0]["presence"], "current")
 
 
+class PublicHistoryAuditCliTest(unittest.TestCase):
+    def test_fails_closed_on_historical_personal_data_and_secrets_without_echoing_values(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "project"
+            repo.mkdir()
+            run_git(repo, "init", "-b", "main")
+            private_email = "person" + "@private-company.dev"
+            private_path = "/Users/" + "privateperson/Projects/app"
+            private_token = "ghp" + "_abcdefghijklmnopqrstuvwxyz1234567890"
+            (repo / "notes.txt").write_text(
+                f"contact={private_email}\nroot={private_path}\ntoken={private_token}\n"
+            )
+            run_git(repo, "add", "notes.txt")
+            run_git(repo, "commit", "-m", "accidental private material")
+            (repo / "notes.txt").write_text("public replacement\n")
+            run_git(repo, "add", "notes.txt")
+            run_git(repo, "commit", "-m", "remove private material from current tree")
+
+            result = run_history("public-audit", str(repo), "--ref", "main", "--json")
+
+            self.assertEqual(result.returncode, 3, result.stderr)
+            self.assertNotIn(private_email, result.stdout)
+            self.assertNotIn(private_path, result.stdout)
+            self.assertNotIn(private_token, result.stdout)
+            report = json.loads(result.stdout)
+            self.assertFalse(report["safe_for_publication"])
+            self.assertEqual(report["selected_ref"], "refs/heads/main")
+            self.assertEqual(report["findings_by_category"]["email-address"], 1)
+            self.assertEqual(report["findings_by_category"]["absolute-user-path"], 1)
+            self.assertEqual(report["findings_by_category"]["github-token"], 1)
+            self.assertGreaterEqual(report["commit_metadata_email_count"], 1)
+
+    def test_accepts_a_clean_selected_ref_and_ignores_an_unselected_private_branch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "project"
+            repo.mkdir()
+            run_git(repo, "init", "-b", "main")
+            (repo / "README.md").write_text("Portable public project.\n")
+            run_git(repo, "add", "README.md")
+            run_git(repo, "commit", "-m", "public root")
+            run_git(repo, "switch", "-c", "private-notes")
+            (repo / "private.txt").write_text("/Users/" + "privateperson/private\n")
+            run_git(repo, "add", "private.txt")
+            run_git(repo, "commit", "-m", "private branch")
+            run_git(repo, "switch", "main")
+
+            result = run_history(
+                "public-audit", str(repo), "--ref", "main",
+                "--allow-email", "fixture@example.invalid", "--json",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertTrue(report["safe_for_publication"])
+            self.assertEqual(report["scanned_ref_count"], 1)
+            self.assertEqual(report["content_blob_count"], 1)
+
+
 class HistoryRewriteCandidateCliTest(unittest.TestCase):
+    def test_builds_a_single_branch_public_candidate_with_redacted_content_and_noreply_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            candidate = root / "public.git"
+            plan = root / "public-plan.json"
+            replacements = root / "private-replacements.txt"
+            source.mkdir()
+            run_git(source, "init", "-b", "main")
+            private_path = "/Users/" + "privateperson/secret"
+            private_token = "ghp" + "_abcdefghijklmnopqrstuvwxyz1234567890"
+            (source / "README.md").write_text(f"path={private_path}\ntoken={private_token}\n")
+            run_git(source, "add", "README.md")
+            run_git(source, "commit", "-m", "initial source")
+            run_git(source, "switch", "-c", "private-notes")
+            (source / "never-public.txt").write_text("private branch only\n")
+            run_git(source, "add", "never-public.txt")
+            run_git(source, "commit", "-m", "private side branch")
+            run_git(source, "switch", "main")
+            replacements.write_text(
+                f"{private_path}==>/Users/developer/project\n{private_token}==>[REDACTED]\n"
+            )
+
+            planned = run_history(
+                "public-plan", str(source), "--ref", "main",
+                "--public-email", "owner@users.noreply.github.com",
+                "--replace-text", str(replacements), "--output", str(plan), "--json",
+            )
+            self.assertEqual(planned.returncode, 0, planned.stderr)
+            built = run_history(
+                "build-public-candidate", "--plan", str(plan),
+                "--destination", str(candidate), "--json",
+            )
+
+            self.assertEqual(built.returncode, 0, built.stderr)
+            report = json.loads(built.stdout)
+            self.assertTrue(report["verification"]["source_unchanged"])
+            self.assertTrue(report["verification"]["selected_branch_only"])
+            self.assertTrue(report["verification"]["public_audit_passed"])
+            refs = subprocess.run(
+                ["git", "--git-dir", str(candidate), "for-each-ref", "--format=%(refname)"],
+                check=True, capture_output=True, text=True,
+            ).stdout.splitlines()
+            self.assertEqual(refs, ["refs/heads/main"])
+            contents = subprocess.run(
+                ["git", "--git-dir", str(candidate), "show", "main:README.md"],
+                check=True, capture_output=True, text=True,
+            ).stdout
+            self.assertNotIn(private_path, contents)
+            self.assertNotIn(private_token, contents)
+            self.assertIn("/Users/developer/project", contents)
+            emails = subprocess.run(
+                ["git", "--git-dir", str(candidate), "log", "--format=%ae%n%ce", "main"],
+                check=True, capture_output=True, text=True,
+            ).stdout.splitlines()
+            self.assertEqual(set(emails), {"owner@users.noreply.github.com"})
+
     def test_removes_an_exact_path_only_in_a_new_verified_candidate(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

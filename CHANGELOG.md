@@ -16,6 +16,12 @@ All notable Warrior releases are recorded here.
   prove requested paths are absent without changing the source.
 - State macOS Tahoe 26 as Warrior's sole supported platform.
 - Document direct CLI invocation through Warrior's `bin` directory on `PATH`.
+- Add a fail-closed, value-withholding public history audit for one selected
+  branch, including content and commit-identity checks.
+- Add source-pinned public projection plans and disconnected candidate builds
+  with single-branch export, metadata anonymisation, exact file/directory
+  removal, private replacement-rule digests, full object verification, and a
+  mandatory post-rewrite audit.
 
 ## 0.1.0 — 2026-08-24
 

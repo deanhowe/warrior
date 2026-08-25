@@ -24,7 +24,11 @@ guided path — this file is the terse operating summary.
    `warrior-project checkpoint-plan <roots...>`. The plan pins current state
    and gives every repository a closure verdict; it does not create a
    checkpoint or grant authority to apply one.
-5. Only after nothing is at risk: `warrior-facts` to orient on the estate,
+5. Before publishing a repository, run `warrior-history public-audit` on the
+   exact branch. If history needs changing, use `public-plan` and
+   `build-public-candidate`; publish the verified candidate, never rewrite the
+   private source in place.
+6. Only after nothing is at risk: `warrior-facts` to orient on the estate,
    `warrior-protect` to give unprotected repos a home, `warrior-classify` to
    record what each repository is for.
 

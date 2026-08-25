@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -67,6 +68,17 @@ SENSITIVE_SUBJECT = re.compile(
 )
 APPLE_GIT = "/usr/bin/git"
 SAFE_MACOS_PATH = "/usr/bin:/usr/local/bin:/opt/homebrew/bin"
+PUBLIC_CONTENT_PATTERNS = {
+    "github-token": re.compile(rb"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
+    "aws-access-key": re.compile(rb"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    "private-key": re.compile(rb"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"),
+    "absolute-user-path": re.compile(
+        rb"(?:/Users/[A-Za-z0-9._-]+/|/home/[A-Za-z0-9._-]+/|[A-Za-z]:\\\\Users\\\\[^\\\\\r\n]+\\\\)"
+    ),
+    "email-address": re.compile(
+        rb"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9.-])"
+    ),
+}
 
 
 def assert_read_only(args: tuple[str, ...]) -> None:
@@ -347,6 +359,121 @@ def source_refs(repo: Path) -> dict[str, str]:
     return refs
 
 
+def selected_public_ref(repo: Path, value: str) -> tuple[str, str]:
+    refs = source_refs(repo)
+    candidates = [value] if value.startswith("refs/") else [f"refs/heads/{value}"]
+    matches = [(name, refs[name]) for name in candidates if name in refs]
+    if len(matches) != 1 or not matches[0][0].startswith("refs/heads/"):
+        raise ValueError("--ref must name exactly one existing local branch")
+    return matches[0]
+
+
+def git_public_read(repo: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProcess[bytes]:
+    environment = dict(os.environ)
+    environment.setdefault("GIT_TERMINAL_PROMPT", "0")
+    return subprocess.run(
+        [APPLE_GIT, "--no-optional-locks", "-c", "core.fsmonitor=", "-C", str(repo), *args],
+        capture_output=True, check=False, timeout=timeout, env=environment,
+    )
+
+
+def reserved_example_email(value: bytes) -> bool:
+    local, domain = value.lower().rsplit(b"@", 1)
+    return (
+        local == b"git"
+        or domain in {b"example.com", b"example.net", b"example.org"}
+        or domain.endswith((b".example.com", b".example.net", b".example.org"))
+        or domain.endswith((b".invalid", b".example", b".test"))
+    )
+
+
+def placeholder_user_path(value: bytes) -> bool:
+    lowered = value.lower().replace(b"\\", b"/")
+    return any(
+        marker in lowered
+        for marker in (b"/users/developer/", b"/users/example/", b"/home/developer/", b"/home/example/")
+    )
+
+
+def public_audit(repo: Path, selected_ref: str, allowed_emails: list[str]) -> dict[str, Any]:
+    repo = repo.expanduser().resolve()
+    refname, ref_object = selected_public_ref(repo, selected_ref)
+    allowed = {value.casefold().encode() for value in allowed_emails}
+    objects = git_public_read(repo, "rev-list", "--objects", refname)
+    if objects.returncode != 0:
+        raise ValueError("could not enumerate the selected public history")
+
+    findings: dict[str, int] = {category: 0 for category in PUBLIC_CONTENT_PATTERNS}
+    finding_locations: list[dict[str, Any]] = []
+    seen_blobs: set[str] = set()
+    for raw_line in objects.stdout.splitlines():
+        object_id, separator, raw_path = raw_line.partition(b" ")
+        if not separator or not raw_path:
+            continue
+        object_text = object_id.decode("ascii", "ignore")
+        if object_text in seen_blobs:
+            continue
+        blob = git_public_read(repo, "cat-file", "blob", object_text)
+        if blob.returncode != 0:
+            continue
+        seen_blobs.add(object_text)
+        path = raw_path.decode("utf-8", "replace")
+        for category, pattern in PUBLIC_CONTENT_PATTERNS.items():
+            matches = list(pattern.finditer(blob.stdout))
+            if category == "email-address":
+                matches = [
+                    match for match in matches
+                    if match.group(0).lower() not in allowed
+                    and not reserved_example_email(match.group(0))
+                ]
+            elif category == "absolute-user-path":
+                matches = [match for match in matches if not placeholder_user_path(match.group(0))]
+            if not matches:
+                continue
+            findings[category] += len(matches)
+            location: dict[str, Any] = {"category": category, "object": object_text}
+            if sensitive_path(path):
+                location["path_withheld"] = True
+            else:
+                location["path"] = path
+                location["path_withheld"] = False
+            finding_locations.append(location)
+
+    metadata = git_public_read(repo, "log", "--format=%ae%x00%ce", refname)
+    if metadata.returncode != 0:
+        raise ValueError("could not inspect selected commit metadata")
+    metadata_emails = {
+        field.strip().lower()
+        for line in metadata.stdout.splitlines()
+        for field in line.split(b"\x00")
+        if field.strip()
+    }
+    unapproved_metadata = metadata_emails - allowed
+    count = git_public_read(repo, "rev-list", "--count", refname)
+    commit_count = int(count.stdout.strip()) if count.returncode == 0 else None
+    safe = not any(findings.values()) and not unapproved_metadata
+    return {
+        "mode": "read-only-public-history-audit",
+        "repository": str(repo),
+        "selected_ref": refname,
+        "selected_object": ref_object,
+        "scanned_ref_count": 1,
+        "reachable_commit_count": commit_count,
+        "content_blob_count": len(seen_blobs),
+        "findings_by_category": findings,
+        "finding_locations": finding_locations,
+        "commit_metadata_email_count": len(metadata_emails),
+        "unapproved_commit_email_count": len(unapproved_metadata),
+        "allowed_email_count": len(allowed),
+        "safe_for_publication": safe,
+        "limits": [
+            "heuristic secret detection reduces risk but cannot prove that arbitrary prose is non-sensitive",
+            "matched values and commit email addresses are never printed",
+            "only the explicitly selected branch was scanned",
+        ],
+    }
+
+
 def validate_removal_path(value: str) -> str:
     path = Path(value)
     if not value or path.is_absolute() or ".." in path.parts or ".git" in path.parts:
@@ -422,6 +549,75 @@ def create_rewrite_plan(repo: Path, remove_paths: list[str], output: Path) -> di
     return plan
 
 
+def validate_public_email(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+", value):
+        raise ValueError("--public-email must be one syntactically safe email address")
+    return value
+
+
+def create_public_plan(
+    repo: Path,
+    selected_ref: str,
+    public_email: str,
+    remove_paths: list[str],
+    replace_text: Optional[Path],
+    output: Path,
+) -> dict[str, Any]:
+    repo = repo.expanduser().resolve()
+    repository = assess(repo, large_bytes=10 * 1024 * 1024)
+    if repository["repository_kind"] != "working-tree":
+        raise ValueError("public planning requires a working-tree repository")
+    assert_clean_source(repo)
+    refname, ref_object = selected_public_ref(repo, selected_ref)
+    paths = sorted({validate_removal_path(item) for item in remove_paths})
+    if paths:
+        objects = git_public_read(repo, "rev-list", "--objects", refname)
+        historical = {
+            line.partition(b" ")[2].decode("utf-8", "replace")
+            for line in objects.stdout.splitlines() if b" " in line
+        }
+        missing = [
+            path for path in paths
+            if not any(item == path or item.startswith(path.rstrip("/") + "/") for item in historical)
+        ]
+        if missing:
+            raise ValueError("one or more remove paths do not exist in selected history")
+    replacement_record = None
+    if replace_text is not None:
+        replacement = replace_text.expanduser().resolve()
+        if not replacement.is_file():
+            raise ValueError("--replace-text must be an existing regular file")
+        if replacement == repo or repo in replacement.parents:
+            raise ValueError("private replacement rules must be outside the source repository")
+        replacement_record = {
+            "path": str(replacement),
+            "sha256": hashlib.sha256(replacement.read_bytes()).hexdigest(),
+        }
+    plan = {
+        "schema_version": 1,
+        "operation": "build-public-projection-candidate",
+        "source_repository": str(repo),
+        "source_head": repository["head"],
+        "source_refs": source_refs(repo),
+        "selected_ref": refname,
+        "selected_object": ref_object,
+        "public_email": validate_public_email(public_email),
+        "remove_paths": paths,
+        "replacement_rules": replacement_record,
+        "safety": {
+            "source_is_never_rewritten": True,
+            "only_selected_branch_is_exported": True,
+            "destination_must_not_exist": True,
+            "candidate_must_pass_public_audit": True,
+        },
+    }
+    destination = safe_plan_output(output)
+    if destination == repo or repo in destination.parents:
+        raise ValueError("public plan output must be outside the source repository")
+    destination.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+    return plan
+
+
 def run_process(
     args: list[str], timeout: int = 300, cwd: Optional[Path] = None
 ) -> subprocess.CompletedProcess[str]:
@@ -442,6 +638,100 @@ def load_rewrite_plan(path: Path) -> dict[str, Any]:
     if plan.get("schema_version") != 1 or plan.get("operation") != "remove-paths-from-candidate-history":
         raise ValueError("unsupported rewrite plan")
     return plan
+
+
+def load_public_plan(path: Path) -> dict[str, Any]:
+    try:
+        plan = json.loads(path.expanduser().read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"could not read public plan: {error}") from error
+    if plan.get("schema_version") != 1 or plan.get("operation") != "build-public-projection-candidate":
+        raise ValueError("unsupported public projection plan")
+    return plan
+
+
+def build_public_candidate(plan_path: Path, destination: Path) -> dict[str, Any]:
+    plan = load_public_plan(plan_path)
+    source = Path(plan["source_repository"]).expanduser().resolve()
+    destination = destination.expanduser().resolve()
+    if destination.exists():
+        raise ValueError("candidate destination already exists; refusing to overwrite it")
+    if not destination.parent.is_dir():
+        raise ValueError("candidate parent directory does not exist")
+    if ".git" in destination.parts or destination == source or source in destination.parents:
+        raise ValueError("candidate destination must be outside source and Git metadata")
+    assert_clean_source(source)
+    if git(source, "rev-parse", "HEAD")[1].strip() != plan.get("source_head"):
+        raise ValueError("source HEAD changed after the public plan was created")
+    if source_refs(source) != plan.get("source_refs"):
+        raise ValueError("source refs changed after the public plan was created")
+    refname, ref_object = selected_public_ref(source, plan["selected_ref"])
+    if ref_object != plan.get("selected_object"):
+        raise ValueError("selected source ref changed after the public plan was created")
+    replacement = None
+    if plan.get("replacement_rules"):
+        replacement = Path(plan["replacement_rules"]["path"]).expanduser().resolve()
+        if not replacement.is_file():
+            raise ValueError("private replacement rules are no longer available")
+        digest = hashlib.sha256(replacement.read_bytes()).hexdigest()
+        if digest != plan["replacement_rules"]["sha256"]:
+            raise ValueError("private replacement rules changed after planning")
+    filter_repo = shutil.which("git-filter-repo")
+    if not filter_repo:
+        raise ValueError("git-filter-repo is required (install it with Homebrew)")
+    filter_entrypoint = Path(filter_repo)
+    if filter_entrypoint.parent not in {Path("/usr/local/bin"), Path("/opt/homebrew/bin")}:
+        raise ValueError("git-filter-repo must be installed in a Homebrew binary directory")
+    branch = refname.removeprefix("refs/heads/")
+    cloned = run_process([
+        APPLE_GIT, "clone", "--bare", "--single-branch", "--branch", branch,
+        "--no-tags", "--no-local", "--", str(source), str(destination),
+    ])
+    if cloned.returncode != 0:
+        raise ValueError(f"public candidate clone failed; preserved partial destination: {cloned.stderr.strip()}")
+    disconnected = run_process([APPLE_GIT, "--git-dir", str(destination), "remote", "remove", "origin"])
+    if disconnected.returncode != 0:
+        raise ValueError("public candidate could not be disconnected; preserved for inspection")
+    email = validate_public_email(plan["public_email"])
+    callback = (
+        f"commit.author_email = {email.encode()!r}\n"
+        f"commit.committer_email = {email.encode()!r}"
+    )
+    filter_args = [filter_repo, "--force", "--commit-callback", callback]
+    for path in plan["remove_paths"]:
+        filter_args.extend(["--path", validate_removal_path(path)])
+    if plan["remove_paths"]:
+        filter_args.append("--invert-paths")
+    if replacement is not None:
+        filter_args.extend(["--replace-text", str(replacement)])
+    rewritten = run_process(filter_args, timeout=900, cwd=destination)
+    if rewritten.returncode != 0:
+        raise ValueError("public candidate rewrite failed; candidate preserved for inspection")
+    candidate_refs = source_refs(destination)
+    checked = run_process([APPLE_GIT, "--git-dir", str(destination), "fsck", "--full"])
+    remotes = run_process([APPLE_GIT, "--git-dir", str(destination), "remote"])
+    audit = public_audit(destination, branch, [email])
+    verification = {
+        "source_unchanged": (
+            git(source, "rev-parse", "HEAD")[1].strip() == plan["source_head"]
+            and source_refs(source) == plan["source_refs"]
+        ),
+        "selected_branch_only": set(candidate_refs) == {refname},
+        "candidate_fsck_passed": checked.returncode == 0,
+        "candidate_has_no_remotes": remotes.returncode == 0 and not remotes.stdout.strip(),
+        "public_audit_passed": audit["safe_for_publication"],
+    }
+    if not all(verification.values()):
+        raise ValueError("public candidate verification failed; candidate preserved for inspection")
+    return {
+        "mode": "public-projection-candidate",
+        "source_repository": str(source),
+        "candidate_repository": str(destination),
+        "selected_ref": refname,
+        "verification": verification,
+        "public_audit": audit,
+        "next_step": "Review the candidate, then use an explicit normal non-force push to the approved public remote.",
+    }
 
 
 def build_candidate(plan_path: Path, destination: Path) -> dict[str, Any]:
@@ -578,17 +868,40 @@ def main() -> int:
         help="large-blob threshold in MiB (default: 10)",
     )
     assess_parser.add_argument("--large-bytes", type=int, help=argparse.SUPPRESS)
+    public_audit_parser = subparsers.add_parser(
+        "public-audit", help="fail closed on secrets or personal data in one selected branch"
+    )
+    public_audit_parser.add_argument("repository", type=Path)
+    public_audit_parser.add_argument("--ref", required=True)
+    public_audit_parser.add_argument("--allow-email", action="append", default=[])
+    public_audit_parser.add_argument("--json", action="store_true")
     plan_parser = subparsers.add_parser("plan", help="write an exact candidate rewrite plan")
     plan_parser.add_argument("repository", type=Path)
     plan_parser.add_argument("--remove-path", action="append", default=[])
     plan_parser.add_argument("--output", type=Path, required=True)
     plan_parser.add_argument("--json", action="store_true")
+    public_plan_parser = subparsers.add_parser(
+        "public-plan", help="write a source-pinned plan for a single-branch public projection"
+    )
+    public_plan_parser.add_argument("repository", type=Path)
+    public_plan_parser.add_argument("--ref", required=True)
+    public_plan_parser.add_argument("--public-email", required=True)
+    public_plan_parser.add_argument("--remove-path", action="append", default=[])
+    public_plan_parser.add_argument("--replace-text", type=Path)
+    public_plan_parser.add_argument("--output", type=Path, required=True)
+    public_plan_parser.add_argument("--json", action="store_true")
     build_parser = subparsers.add_parser(
         "build-candidate", help="rewrite a new bare candidate; never the source"
     )
     build_parser.add_argument("--plan", type=Path, required=True)
     build_parser.add_argument("--destination", type=Path, required=True)
     build_parser.add_argument("--json", action="store_true")
+    public_build_parser = subparsers.add_parser(
+        "build-public-candidate", help="build and fail-closed audit a single-branch public candidate"
+    )
+    public_build_parser.add_argument("--plan", type=Path, required=True)
+    public_build_parser.add_argument("--destination", type=Path, required=True)
+    public_build_parser.add_argument("--json", action="store_true")
     arguments = parser.parse_args()
     try:
         if arguments.command == "assess":
@@ -601,21 +914,44 @@ def main() -> int:
                 raise ValueError("the large-blob threshold must be zero or greater")
             report = assess(arguments.repository.expanduser().resolve(), large_bytes)
             text_output = render(report)
+        elif arguments.command == "public-audit":
+            report = public_audit(
+                arguments.repository, arguments.ref, arguments.allow_email
+            )
+            text_output = (
+                "Public history audit passed."
+                if report["safe_for_publication"]
+                else "Public history audit blocked publication; inspect the JSON report."
+            )
+        elif arguments.command == "public-plan":
+            report = create_public_plan(
+                arguments.repository, arguments.ref, arguments.public_email,
+                arguments.remove_path, arguments.replace_text, arguments.output,
+            )
+            text_output = f"Public projection plan written to {arguments.output}. Source was not changed."
         elif arguments.command == "plan":
             report = create_rewrite_plan(
                 arguments.repository, arguments.remove_path, arguments.output
             )
             text_output = f"Rewrite plan written to {arguments.output}. Source was not changed."
-        else:
+        elif arguments.command == "build-candidate":
             report = build_candidate(arguments.plan, arguments.destination)
             text_output = (
                 f"Verified candidate written to {report['candidate_repository']}. "
+                "Source and remotes were not changed."
+            )
+        else:
+            report = build_public_candidate(arguments.plan, arguments.destination)
+            text_output = (
+                f"Verified public candidate written to {report['candidate_repository']}. "
                 "Source and remotes were not changed."
             )
     except ValueError as error:
         print(f"warrior-history: {error}", file=sys.stderr)
         return 2
     print(json.dumps(report, indent=2, sort_keys=True) if arguments.json else text_output)
+    if arguments.command == "public-audit" and not report["safe_for_publication"]:
+        return 3
     return 0
 
 

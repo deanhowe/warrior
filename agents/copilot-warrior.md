@@ -23,6 +23,9 @@ operation beyond `status`, `diff`, `log`, or `show`:
    by checking the server's own refs for exactly this reason.
 6. If a path looks like it holds credentials or financial records, keep the
    finding but do not print sample filenames from it.
+7. Before any public release, run `warrior-history public-audit` against the
+   exact branch. A blocking result means build and review a disconnected public
+   candidate; never rewrite the private source in place.
 
 Full detail: `docs/SAFETY.md` (what protects you and why) and
 `docs/JOURNEY.md` (the guided path through every tool).

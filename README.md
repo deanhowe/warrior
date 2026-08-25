@@ -75,7 +75,7 @@ Eleven tools in `bin/`, all read-only or additive:
 | `warrior-server-status` | Is your git forge actually healthy right now — reachability, disk headroom, mirror staleness, backup freshness — not just whether it answers HTTP 200 |
 | `warrior-sidecar` | Give a project a named, versioned space beside it that its own history never sees — goals, tmp, wiki — instead of a gitignored directory with zero protection |
 | `warrior-knowledge` | Read-only health check for a Git-backed knowledge source: identity, dirt, remote symbolic HEAD, and exact local/remote commit equality; no harness or forge assumptions |
-| `warrior-history` | History doctor: explains large blobs, databases, archives, compiled artifacts, multiple roots and unreachable commits, then can remove exact paths from a new disconnected candidate without rewriting the source |
+| `warrior-history` | History doctor and public-export gate: explains risky history, removes files or whole directories in disconnected candidates, scans one selected branch for secret/personal-data patterns, and builds a fail-closed public projection without rewriting the source |
 | `warrior-upstream` | Proves a vendored source relationship from a manifest: exact commit, byte-identical files, renames, declared adaptations, omissions, and undeclared drift—without fetching or updating anything |
 | `warrior-project` | Builds a read-only import dossier, then turns current dirty state into a pinned checkpoint closure plan with one verdict per repository, sensitive names withheld, and no automatic checkpoint writes |
 

@@ -28,6 +28,9 @@ with you why git hid it from them in the first place.
   evidence it did the right thing; check the actual state after.
 - If a path looks like it holds credentials or financial records, keep the
   finding but withhold sample filenames.
+- Before a public release, run `warrior-history public-audit` on the exact
+  branch. A block means build and review a disconnected public candidate;
+  preserve the private source history in place.
 
 ## Tone
 

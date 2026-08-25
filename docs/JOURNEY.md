@@ -156,10 +156,44 @@ paths are absent from every reachable candidate ref, and rechecks that the
 source HEAD and refs did not move. A partial or failed candidate is preserved
 for inspection; Warrior never deletes it and never retries over it.
 
-This first rewrite surface removes exact file or directory paths. Content-level
-secret replacement, commit dropping/squashing, canonical cutover, and any push
-remain separate future capabilities. The candidate is evidence to inspect, not
-permission to replace a repository.
+This rewrite surface removes exact files or whole directory trees. The
+candidate is evidence to inspect, not permission to replace a repository.
+
+### Build a public projection without rewriting your private source
+
+Audit exactly the branch you intend to publish:
+
+```bash
+warrior-history public-audit ~/code/my-project \
+  --ref main \
+  --allow-email owner@users.noreply.github.com \
+  --json
+```
+
+Exit code `3` blocks publication. The JSON reports categories and locations
+but never the matched values. For anything real, write `git-filter-repo`
+replacement expressions in a private file outside the source repository, then
+pin the release inputs:
+
+```bash
+warrior-history public-plan ~/code/my-project \
+  --ref main \
+  --public-email owner@users.noreply.github.com \
+  --remove-path private-directory \
+  --replace-text ~/private/replacements.txt \
+  --output ~/private/public-plan.json
+
+warrior-history build-public-candidate \
+  --plan ~/private/public-plan.json \
+  --destination ~/private/my-project-public.git
+```
+
+The public candidate contains only `main`; other branches, tags, backup refs,
+and unrelated roots are not copied. Every historical author/committer email is
+rewritten to the declared public identity. Warrior disconnects the candidate,
+applies removals/replacements there, verifies objects, audits it again, and
+proves the source did not move. It does not add a public remote or push. Review
+the candidate and use a normal non-force push only under explicit authority.
 
 ## Chapter 2¾ — Know what came from upstream
 
