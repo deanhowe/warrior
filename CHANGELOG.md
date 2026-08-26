@@ -4,6 +4,12 @@ All notable Warrior releases are recorded here.
 
 ## Unreleased
 
+- Add portable Guardian, Wayfinder, and lease-bound Builder contracts with
+  native Kiro, Claude, and Copilot profiles plus an explicit Codex skill map.
+- Add `warrior-agents`, a zero-credit native validator and plan-first installer
+  that refuses to overwrite a differing existing harness profile.
+- Track Codex's five-hour and weekly allowance windows independently and avoid
+  stale startup-gate matches when reading its TUI.
 - Add `warrior-project checkpoint-plan`: a read-only closure ledger pinned to
   repository HEAD and exact status, with separate checkpoint/package states,
   per-repository verdicts, duplicate-identity blockers, sensitive-name

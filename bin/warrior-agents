@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""List, validate, and safely install Warrior's native harness profiles."""
+
+from __future__ import annotations
+
+import argparse
+import filecmp
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+ROLES = ("guardian", "wayfinder", "builder")
+HARNESSES = ("kiro", "claude", "copilot")
+
+
+def source_path(harness: str, role: str) -> Path:
+    suffix = {"kiro": ".json", "claude": ".md", "copilot": ".agent.md"}[harness]
+    return ROOT / "agents" / harness / f"warrior-{role}{suffix}"
+
+
+def destination_path(harness: str, role: str, project: Path | None) -> Path:
+    if project is None:
+        base = {
+            "kiro": Path.home() / ".kiro" / "agents",
+            "claude": Path.home() / ".claude" / "agents",
+            "copilot": Path.home() / ".copilot" / "agents",
+        }[harness]
+    else:
+        base = {
+            "kiro": project / ".kiro" / "agents",
+            "claude": project / ".claude" / "agents",
+            "copilot": project / ".github" / "agents",
+        }[harness]
+    return base / source_path(harness, role).name
+
+
+def validate_source(harness: str, role: str) -> list[str]:
+    source = source_path(harness, role)
+    problems: list[str] = []
+    if not source.is_file():
+        return [f"missing: {source}"]
+    text = source.read_text()
+    expected_name = f"warrior-{role}"
+    if harness == "kiro":
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as error:
+            return [f"invalid JSON: {error}"]
+        if payload.get("name") != expected_name:
+            problems.append(f"name must be {expected_name!r}")
+        if role != "builder" and "fs_write" in payload.get("allowedTools", []):
+            problems.append("read-only role allows fs_write")
+        if role == "builder" and payload.get("toolsSettings", {}).get("fs_write", {}).get("requireApproval") != "always":
+            problems.append("Builder fs_write must require approval")
+    else:
+        if not text.startswith("---\n") or f"name: {expected_name}\n" not in text:
+            problems.append("missing or incorrect native frontmatter name")
+        if role == "builder" and harness == "copilot" and "disable-model-invocation: true" not in text:
+            problems.append("Copilot Builder must disable automatic model invocation")
+    normalized_text = " ".join(text.split())
+    if role == "builder" and "exact file allow-list" not in normalized_text:
+        problems.append("Builder is missing its exact file allow-list gate")
+    if role != "builder" and "read-only" not in text.lower():
+        problems.append("read-only role does not state its authority")
+    return problems
+
+
+def validate_native_kiro(role: str) -> str:
+    binary = shutil.which("kiro-cli")
+    if not binary:
+        return "not installed; structural validation only"
+    completed = subprocess.run(
+        [binary, "agent", "validate", "--path", str(source_path("kiro", role))],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"Kiro rejected warrior-{role}: {detail}")
+    return "native validation passed"
+
+
+def command_validate(as_json: bool) -> int:
+    records = []
+    failed = False
+    for harness in HARNESSES:
+        for role in ROLES:
+            problems = validate_source(harness, role)
+            native = None
+            if not problems and harness == "kiro":
+                try:
+                    native = validate_native_kiro(role)
+                except RuntimeError as error:
+                    problems.append(str(error))
+            failed = failed or bool(problems)
+            records.append({"harness": harness, "role": role, "ok": not problems,
+                            "native": native, "problems": problems})
+    if as_json:
+        print(json.dumps({"ok": not failed, "profiles": records}, indent=2))
+    else:
+        for record in records:
+            state = "OK" if record["ok"] else "FAIL"
+            detail = "; ".join(record["problems"]) or record["native"] or "structural validation passed"
+            print(f"{state:<4} {record['harness']:<7} warrior-{record['role']:<9} {detail}")
+    return 1 if failed else 0
+
+
+def command_install(harness: str, role: str, project: Path | None, apply: bool) -> int:
+    problems = validate_source(harness, role)
+    if problems:
+        print("Refusing to install an invalid profile: " + "; ".join(problems), file=sys.stderr)
+        return 1
+    target = destination_path(harness, role, project)
+    source = source_path(harness, role)
+    if target.exists():
+        if target.is_file() and filecmp.cmp(source, target, shallow=False):
+            print(f"unchanged: {target}")
+            return 0
+        print(f"refused: {target} already exists with different content", file=sys.stderr)
+        return 2
+    if not apply:
+        print(f"would install: {source} -> {target}")
+        return 0
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    if not filecmp.cmp(source, target, shallow=False):
+        print(f"verification failed: {target}", file=sys.stderr)
+        return 1
+    print(f"installed and verified: {target}")
+    print("Restart or start a new harness session before selecting this profile.")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    validate = subparsers.add_parser("validate", help="validate all native profiles")
+    validate.add_argument("--json", action="store_true")
+    install = subparsers.add_parser("install", help="plan or install one native profile")
+    install.add_argument("harness", choices=HARNESSES)
+    install.add_argument("role", choices=ROLES)
+    install.add_argument("--project", type=Path, help="install into a project instead of the user profile")
+    install.add_argument("--apply", action="store_true", help="perform the copy; the default is a plan")
+    arguments = parser.parse_args()
+    if arguments.command == "validate":
+        return command_validate(arguments.json)
+    project = arguments.project.expanduser().resolve() if arguments.project else None
+    if project is not None and not project.is_dir():
+        parser.error(f"project is not a directory: {project}")
+    return command_install(arguments.harness, arguments.role, project, arguments.apply)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

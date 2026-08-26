@@ -63,7 +63,7 @@ marketplace, the same pattern upstream uses. Run
 
 ### Preservation — the layer everything else sits on
 
-Eleven tools in `bin/`, all read-only or additive:
+Twelve tools in `bin/`, all read-only, additive, or plan-first:
 
 | Tool&nbsp;command&nbsp;(copy/paste) | What it does |
 |---|---|
@@ -72,6 +72,7 @@ Eleven tools in `bin/`, all read-only or additive:
 | `warrior-protect` | Gives an unprotected repository a real, *verified* home on a git server — verified by checking the server's own refs, never by trusting an exit code |
 | `warrior-classify` | Works out what each repository on your server is *for* — your own code, a mirror of someone else's, an archive — and records it |
 | `warrior-credits` | Live credit/quota balance across every AI harness you run, at zero token cost, without spending a prompt to ask |
+| `warrior-agents` | Validates and safely installs native Guardian, Wayfinder, and lease-bound Builder profiles for Kiro, Claude, and Copilot; Codex uses the matching native skills |
 | `warrior-server-status` | Is your git forge actually healthy right now — reachability, disk headroom, mirror staleness, backup freshness — not just whether it answers HTTP 200 |
 | `warrior-sidecar` | Give a project a named, versioned space beside it that its own history never sees — goals, tmp, wiki — instead of a gitignored directory with zero protection |
 | `warrior-knowledge` | Read-only health check for a Git-backed knowledge source: identity, dirt, remote symbolic HEAD, and exact local/remote commit equality; no harness or forge assumptions |
