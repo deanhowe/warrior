@@ -113,8 +113,11 @@ def tmux_session(tmux: str, name: str, workdir: str, command: list[str]) -> None
 
 
 def tmux_capture(tmux: str, name: str, lines_back: int = 100) -> str:
+    command = [tmux, "capture-pane", "-t", name, "-p"]
+    if lines_back > 0:
+        command.extend(["-S", f"-{lines_back}"])
     result = subprocess.run(
-        [tmux, "capture-pane", "-t", name, "-p", "-S", f"-{lines_back}"],
+        command,
         capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=10,
     )
     return result.stdout if result.returncode == 0 else ""
@@ -299,7 +302,10 @@ def fetch_codex() -> dict[str, Any]:
         tmux_session(tmux, session, workdir, [binary])
         for _ in range(20):
             time.sleep(TMUX_POLL_INTERVAL)
-            pane = tmux_capture(tmux, session)
+            # Read only the current pane while crossing startup gates. If
+            # scrollback is included, an old "Hooks need review" line remains
+            # matchable after the gate has already been answered.
+            pane = tmux_capture(tmux, session, lines_back=0)
             if "Do you trust the contents" in pane:
                 tmux_send(tmux, session, "Enter")  # default: "Yes, continue"
             elif "Hooks need review" in pane:
@@ -312,24 +318,42 @@ def fetch_codex() -> dict[str, Any]:
         time.sleep(1)
         tmux_send(tmux, session, "Enter")
         text = wait_for(tmux, session, r"Weekly limit:", attempts=15)
-        line = next((l for l in text.splitlines() if "Weekly limit:" in l), "")
-        if not line:
+        if "Weekly limit:" not in text:
             raise QuotaFetchError("weekly limit line not found within timeout")
-        return parse_codex(line)
+        return parse_codex(text)
     finally:
         tmux_send(tmux, session, "C-c")
         tmux_kill(tmux, session)
 
 
-def parse_codex(line: str) -> dict[str, Any]:
-    match = re.search(r"(\d+)% left \(resets ([\d:]+) on ([\d A-Za-z]+)\)", line)
-    if not match:
-        raise QuotaFetchError(f"could not parse codex weekly limit line: {line!r}")
-    remaining = int(match.group(1))
-    return {
-        "weekly_pct_remaining": remaining, "weekly_pct_used": 100 - remaining,
-        "resets_at": match.group(2).strip(), "resets_date": match.group(3).strip(),
+def parse_codex(text: str) -> dict[str, Any]:
+    weekly = re.search(
+        r"Weekly limit:[^\n]*?(\d+)% left \(resets ([\d:]+) on ([\d A-Za-z]+)\)",
+        text,
+    )
+    if not weekly:
+        raise QuotaFetchError("could not parse codex weekly limit line")
+    weekly_remaining = int(weekly.group(1))
+    weekly_time = weekly.group(2).strip()
+    weekly_date = weekly.group(3).strip()
+    result = {
+        "weekly_pct_remaining": weekly_remaining,
+        "weekly_pct_used": 100 - weekly_remaining,
+        "resets_at": weekly_time,
+        "resets_date": weekly_date,
+        "weekly_resets_on": f"{weekly_date} at {weekly_time}",
     }
+    five_hour = re.search(
+        r"5h limit:[^\n]*?(\d+)% left \(resets ([\d:]+)\)", text
+    )
+    if five_hour:
+        session_remaining = int(five_hour.group(1))
+        result.update({
+            "session_pct_remaining": session_remaining,
+            "session_pct_used": 100 - session_remaining,
+            "session_resets_on": five_hour.group(2).strip(),
+        })
+    return result
 
 
 FETCHERS = {
@@ -422,10 +446,13 @@ def main() -> int:
         session_remaining = data.get("session_pct_remaining")
         parts = []
         if session_remaining is not None:
-            parts.append(f"session {session_remaining}% remaining")
+            label = "5h" if name == "codex" else "session"
+            parts.append(f"{label} {session_remaining}% remaining")
+            if session_remaining < LOW_WATERMARK_PCT:
+                low.append(name)
         if remaining is not None:
             parts.append(f"{remaining}% remaining")
-            if remaining < LOW_WATERMARK_PCT:
+            if remaining < LOW_WATERMARK_PCT and name not in low:
                 low.append(name)
         reset = data.get("weekly_resets_on") or data.get("resets_on") or data.get("resets_date")
         suffix = f" (resets {reset})" if reset else ""
