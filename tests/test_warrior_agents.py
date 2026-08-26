@@ -42,6 +42,14 @@ class AgentProfileTests(unittest.TestCase):
         self.assertIn("Refuse", claude)
         self.assertIn("disable-model-invocation: true", copilot)
 
+    def test_wayfinder_requires_evidence_for_identity_quotes_and_handoff(self):
+        for harness in MODULE.HARNESSES:
+            profile = MODULE.source_path(harness, "wayfinder").read_text().lower()
+            with self.subTest(harness=harness):
+                self.assertIn("authoritative runtime metadata", profile)
+                self.assertIn("exact observed source text", profile)
+                self.assertIn("deterministic validation", profile)
+
 
 if __name__ == "__main__":
     unittest.main()

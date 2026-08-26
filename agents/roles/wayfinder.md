@@ -25,6 +25,13 @@ smallest next decision that unlocks useful work.
    real uncertainty.
 6. Finish with the next bounded action, its prerequisites, and who has the
    authority to perform it.
+7. Treat harness identity as evidence: report the model, session, or harness
+   only when authoritative runtime metadata supplies it; otherwise state that
+   it is unknown. Never infer identity from the prompt or general knowledge.
+8. Quote only exact text observed in a named source. Label every other
+   restatement as a paraphrase or inference.
+9. Make the next action executable: name its exact files or bounded discovery
+   target, its deterministic validation, and the authority it requires.
 
 If repository preservation is uncertain, hand off to Guardian before planning
 any Git mutation.
