@@ -21,7 +21,9 @@ scraped from raw ANSI output reliably, so each harness is driven inside a real
 `tmux` session and read back with `tmux capture-pane`, which maintains an
 actual screen buffer. The session is always torn down, success or failure.
 
-  claude   /usage typed into the interactive TUI. No prompt sent.
+  claude   reads Claude.app's own plan-usage-history.json on disk (~5min
+           sampled). No session spawned, no TUI driven, no prompt sent. See
+           the Claude section below for why this replaced a tmux /usage scrape.
   copilot  the footer's "quota" statusline item, rendered on startup, before
            any prompt — requires footer.showQuota=true (see --setup).
   kiro     /usage via `chat --no-interactive`, confirmed client-side (numbers
@@ -146,40 +148,115 @@ def wait_for(tmux: str, name: str, pattern: str, attempts: int, lines_back: int 
 # ---------------------------------------------------------------------------
 # Claude
 # ---------------------------------------------------------------------------
+#
+# This used to tmux-scrape /usage like copilot and codex below. Rewritten
+# 2026-09-02 after that pattern was found (in the sibling Moof project, which
+# this tool was extracted from) to spawn a real, durable Claude Code session
+# on every single invocation. A dashboard that polls its harnesses on a timer
+# was therefore quietly creating hundreds of sessions a day as a side effect
+# of asking "how much of my quota is left" - the measurement was consuming
+# the resource it measured.
+#
+# Claude.app already samples these exact numbers to disk roughly every 5
+# minutes, unprompted, as part of its own UI. Reading that file spawns
+# nothing. Verified against 2072 real samples spanning a month: the 5-hour
+# window's reset gaps median 5.70h, the 7-day window's median 173.17h
+# (~7.2d) - both close to exact, as expected. The reset day of week is NOT
+# fixed: an early reading (3 consecutive Wednesdays) looked calendar-aligned,
+# but a later sample showed a reset on a Tuesday instead. The boundary is
+# detected from the first sample taken after it occurs, not a live push, so
+# a gap in Claude.app running (it only samples while open) can make the
+# *detected* time land anywhere in that gap - the window length itself
+# (~7.2d) held exactly; only the weekday drifted. This is
+# macOS/Claude.app-specific (no Linux or Windows equivalent is known), so on
+# any other platform or if the file is absent, this raises
+# HarnessUnavailable like a harness that isn't installed - it is not treated
+# as an error.
+
+CLAUDE_USAGE_HISTORY = os.path.expanduser(
+    "~/Library/Application Support/Claude/plan-usage-history.json"
+)
+CLAUDE_SESSION_WINDOW_SECONDS = 5 * 60 * 60
+CLAUDE_WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60
+CLAUDE_MAX_SAMPLE_AGE_SECONDS = 6 * 60 * 60
+
 
 def fetch_claude() -> dict[str, Any]:
-    binary = find_binary("claude")
-    if not binary:
-        raise HarnessUnavailable("claude executable not found on PATH")
-    tmux = require_tmux()
-    session = f"warrior_claude_{os.getpid()}"
-    workdir = scratch_dir()
+    if not os.path.exists(CLAUDE_USAGE_HISTORY):
+        raise HarnessUnavailable(
+            f"Claude.app usage history not found at {CLAUDE_USAGE_HISTORY} "
+            "(only known on macOS, with Claude.app installed and run at least once)"
+        )
     try:
-        tmux_session(tmux, session, workdir, [binary])
-        wait_for(tmux, session, r"Claude Code v", attempts=30)
-        tmux_send(tmux, session, "/usage")
-        time.sleep(0.3)
-        tmux_send(tmux, session, "Enter")
-        text = wait_for(tmux, session, r"Current week \(all models\)", attempts=20)
-        if "Current week (all models)" not in text:
-            raise QuotaFetchError("claude /usage did not render within timeout")
-        return parse_claude(text)
-    finally:
-        tmux_send(tmux, session, "Escape", "C-c")
-        tmux_kill(tmux, session)
+        payload = json.loads(Path(CLAUDE_USAGE_HISTORY).read_text())
+    except (OSError, ValueError) as error:
+        raise QuotaFetchError(f"could not read Claude usage history: {error}")
+
+    samples = [
+        s for s in payload.get("samples", [])
+        if isinstance(s, dict)
+        and isinstance(s.get("t"), (int, float))
+        and isinstance(s.get("u"), dict)
+    ]
+    if not samples:
+        raise QuotaFetchError("Claude usage history contains no well-formed samples")
+    samples.sort(key=lambda s: s["t"])
+    return parse_claude(samples)
 
 
-def parse_claude(text: str) -> dict[str, Any]:
-    session = re.search(r"Current session\s+[^\n]*\s+(\d+)% used\s+Resets\s+([^\n]+)", text)
-    week = re.search(r"Current week \(all models\)\s+[^\n]*\s+(\d+)% used\s+Resets\s+([^\n]+)", text)
-    if not session or not week:
-        raise QuotaFetchError("could not parse claude usage output")
-    session_used, week_used = int(session.group(1)), int(week.group(1))
+def _claude_percent(sample: dict[str, Any], key: str) -> int:
+    # Claude.app omits a window from `u` entirely when nothing has been used
+    # in it - that is a zero, not a missing-data error.
+    value = sample.get("u", {}).get(key, 0)
+    if not isinstance(value, (int, float)):
+        return 0
+    return max(0, min(100, int(round(value))))
+
+
+def _claude_window_start_ms(samples: list[dict[str, Any]], key: str) -> float | None:
+    """Timestamp the currently-open window began: the most recent drop
+    (previous window expired) or rise-from-zero (a fresh window opened after
+    an idle stretch), scanning backwards. None means no boundary anywhere in
+    history, in which case the caller must not invent a reset time."""
+    for i in range(len(samples) - 1, 0, -1):
+        current = _claude_percent(samples[i], key)
+        previous = _claude_percent(samples[i - 1], key)
+        if current < previous or (previous == 0 and current > 0):
+            return samples[i]["t"]
+    return None
+
+
+def _claude_format_reset(start_ms: float | None, window_seconds: int, now: float) -> str:
+    if start_ms is None:
+        return "unknown"
+    reset = start_ms / 1000.0 + window_seconds
+    if reset <= now:
+        elapsed = now - reset
+        reset += window_seconds * (int(elapsed // window_seconds) + 1)
+    rendered = time.strftime("%a %-d %b, %-I:%M%p", time.localtime(reset))
+    return rendered.replace("AM", "am").replace("PM", "pm")
+
+
+def parse_claude(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    latest = samples[-1]
+    now = time.time()
+    age = now - latest["t"] / 1000.0
+    if age > CLAUDE_MAX_SAMPLE_AGE_SECONDS:
+        raise QuotaFetchError(
+            f"Claude usage history is stale ({age / 3600.0:.1f}h old); "
+            "is Claude.app running?"
+        )
+    session_used = _claude_percent(latest, "fh")
+    weekly_used = _claude_percent(latest, "sd")
     return {
         "session_pct_used": session_used, "session_pct_remaining": 100 - session_used,
-        "session_resets_on": session.group(2).strip(),
-        "weekly_pct_used": week_used, "weekly_pct_remaining": 100 - week_used,
-        "weekly_resets_on": week.group(2).strip(),
+        "session_resets_on": _claude_format_reset(
+            _claude_window_start_ms(samples, "fh"), CLAUDE_SESSION_WINDOW_SECONDS, now
+        ),
+        "weekly_pct_used": weekly_used, "weekly_pct_remaining": 100 - weekly_used,
+        "weekly_resets_on": _claude_format_reset(
+            _claude_window_start_ms(samples, "sd"), CLAUDE_WEEKLY_WINDOW_SECONDS, now
+        ),
     }
 
 
