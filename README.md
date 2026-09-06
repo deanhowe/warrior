@@ -63,7 +63,7 @@ marketplace, the same pattern upstream uses. Run
 
 ### Preservation — the layer everything else sits on
 
-Twelve tools in `bin/`, all read-only, additive, or plan-first:
+Thirteen tools in `bin/`, all read-only, additive, or plan-first:
 
 | Tool&nbsp;command&nbsp;(copy/paste) | What it does |
 |---|---|
@@ -79,6 +79,7 @@ Twelve tools in `bin/`, all read-only, additive, or plan-first:
 | `warrior-history` | History doctor and public-export gate: explains risky history, removes files or whole directories in disconnected candidates, scans one selected branch for secret/personal-data patterns, and builds a fail-closed public projection without rewriting the source |
 | `warrior-upstream` | Proves a vendored source relationship from a manifest: exact commit, byte-identical files, renames, declared adaptations, omissions, and undeclared drift—without fetching or updating anything |
 | `warrior-project` | Builds a read-only import dossier, then turns current dirty state into a pinned checkpoint closure plan with one verdict per repository, sensitive names withheld, and no automatic checkpoint writes |
+| `warrior-laravel` | Builds a bounded Laravel/PHP evidence dossier: Composer identity, framework signals, tenancy, broadcasting, tests, frontend markers, and protected boundaries without reading secrets or dependency trees |
 
 `hooks/pre-push-preservation` is the matching Git-side guard. It reads the
 actual local and remote ref pairs Git supplies on stdin, allows new and

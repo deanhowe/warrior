@@ -2,7 +2,7 @@
 
 ## Chapter 1 — Know your machine, never lose work (SHIPPED)
 
-Eleven tools, each read-only or additive, each with real tests:
+Thirteen tools, each read-only or additive, each with real tests:
 
 - **`warrior-scan`** — read-only work-loss scan: what could be lost right now,
   and where. Eleven vectors, from JetBrains shelves to unreachable commits.
@@ -37,6 +37,10 @@ Eleven tools, each read-only or additive, each with real tests:
   import and produces a state-pinned checkpoint closure plan with one verdict
   per repository. It withholds sensitive names and does not create checkpoints,
   repositories, packages, remotes, commits, or pushes.
+- **`warrior-laravel`** — builds a bounded Laravel/PHP evidence dossier from
+  Composer and known framework marker paths. It never reads environment or
+  dependency trees and never invokes Git, Artisan, Composer, a model, or a
+  network service.
 
 Exact file/directory history removal into a new, disconnected, verified
 candidate is shipped. So are a one-branch public-history audit and a public
