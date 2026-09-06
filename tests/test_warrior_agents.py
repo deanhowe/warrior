@@ -38,9 +38,18 @@ class AgentProfileTests(unittest.TestCase):
         kiro = MODULE.source_path("kiro", "builder").read_text()
         claude = MODULE.source_path("claude", "builder").read_text()
         copilot = MODULE.source_path("copilot", "builder").read_text()
+        codex = MODULE.source_path("codex", "builder").read_text()
         self.assertIn('"requireApproval": "always"', kiro)
         self.assertIn("Refuse", claude)
         self.assertIn("disable-model-invocation: true", copilot)
+        self.assertIn("exact file allow-list", codex)
+
+    def test_codex_uses_native_toml_agent_destination(self):
+        self.assertEqual(".toml", MODULE.source_path("codex", "guardian").suffix)
+        self.assertEqual(
+            Path(".codex/agents/warrior-guardian.toml"),
+            MODULE.destination_path("codex", "guardian", Path("/project")).relative_to("/project"),
+        )
 
     def test_wayfinder_requires_evidence_for_identity_quotes_and_handoff(self):
         for harness in MODULE.HARNESSES:

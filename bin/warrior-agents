@@ -13,11 +13,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ROLES = ("guardian", "wayfinder", "builder")
-HARNESSES = ("kiro", "claude", "copilot")
+HARNESSES = ("kiro", "claude", "copilot", "codex")
 
 
 def source_path(harness: str, role: str) -> Path:
-    suffix = {"kiro": ".json", "claude": ".md", "copilot": ".agent.md"}[harness]
+    suffix = {"kiro": ".json", "claude": ".md", "copilot": ".agent.md", "codex": ".toml"}[harness]
     return ROOT / "agents" / harness / f"warrior-{role}{suffix}"
 
 
@@ -27,12 +27,14 @@ def destination_path(harness: str, role: str, project: Path | None) -> Path:
             "kiro": Path.home() / ".kiro" / "agents",
             "claude": Path.home() / ".claude" / "agents",
             "copilot": Path.home() / ".copilot" / "agents",
+            "codex": Path.home() / ".codex" / "agents",
         }[harness]
     else:
         base = {
             "kiro": project / ".kiro" / "agents",
             "claude": project / ".claude" / "agents",
             "copilot": project / ".github" / "agents",
+            "codex": project / ".codex" / "agents",
         }[harness]
     return base / source_path(harness, role).name
 
@@ -55,6 +57,16 @@ def validate_source(harness: str, role: str) -> list[str]:
             problems.append("read-only role allows fs_write")
         if role == "builder" and payload.get("toolsSettings", {}).get("fs_write", {}).get("requireApproval") != "always":
             problems.append("Builder fs_write must require approval")
+    elif harness == "codex":
+        try:
+            import tomllib
+            payload = tomllib.loads(text)
+        except (ImportError, ValueError) as error:
+            return [f"invalid TOML: {error}"]
+        if payload.get("name") != expected_name:
+            problems.append(f"name must be {expected_name!r}")
+        if not payload.get("developer_instructions"):
+            problems.append("missing developer_instructions")
     else:
         if not text.startswith("---\n") or f"name: {expected_name}\n" not in text:
             problems.append("missing or incorrect native frontmatter name")
