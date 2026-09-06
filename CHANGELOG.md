@@ -5,7 +5,7 @@ All notable Warrior releases are recorded here.
 ## Unreleased
 
 - Add portable Guardian, Wayfinder, and lease-bound Builder contracts with
-  native Kiro, Claude, and Copilot profiles plus an explicit Codex skill map.
+  native Kiro, Claude, Copilot, and Codex profiles.
 - Add `warrior-agents`, a zero-credit native validator and plan-first installer
   that refuses to overwrite a differing existing harness profile.
 - Track Codex's five-hour and weekly allowance windows independently and avoid
