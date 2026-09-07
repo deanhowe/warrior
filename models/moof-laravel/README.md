@@ -68,7 +68,9 @@ those idioms *are*. We added a list of ten concrete, checkable conventions -
 form requests, API resources, policies, route model binding, Eloquent
 relationship naming, polymorphic pivots, queued jobs, Pest test structure -
 each one verified against real Laravel source before being written in, not
-assumed from memory.
+assumed from memory. The prompt also asks for compact, operational examples:
+Form Request answers must reach `$request->validated()`, and Pest answers must
+use Pest's closure syntax rather than silently switching to PHPUnit.
 
 That verification step caught a real fabrication. A larger model
 (`gpt-oss:120b`, run via Ollama Cloud) was asked to draft the idiom list and

@@ -53,6 +53,23 @@ passed; Form Requests, queued jobs, and Pest structure did not meet the
 checks. This is a constrained baseline, not a release claim. Keep the command,
 digest, and score together when comparing a future Modelfile or weight change.
 
+## Compact-prompt refinement (2026-09-07)
+
+The Modelfile now asks for the exact operational shape first: Form Request
+answers should reach `$request->validated()`, Pest answers should begin with an
+`it(..., function () { ... })` closure containing `actingAs()`, and short
+answers should not spend their budget describing the model. A candidate was
+built under the local-only tag `deanhowe/moof-laravel:candidate-20260907b`
+while the previous release was preserved as
+`deanhowe/moof-laravel:pre-compact-prompt-20260907`.
+
+At the evaluator's 64-token cap, the stable model scored **4/6 (67%)**
+(version honesty, nested binding scope, policy authorization, and queued jobs);
+the candidate still scored **0/2** on the two short-answer cases because the
+responses were truncated before all required terms. The candidate has not been
+promoted to `:latest`. This is an honest response-budget limitation, not a
+claim of training or general Laravel competence.
+
 ## Improving the model without pretending to train it
 
 Use failed checks as evidence. Update the system prompt or add a verified
