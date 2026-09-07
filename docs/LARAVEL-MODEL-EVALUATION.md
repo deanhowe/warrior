@@ -26,7 +26,9 @@ request at a 4096-token context by default, so an open-ended model cannot run
 away with the machine. Start with one or three tasks when
 iterating on a Modelfile, then run all six before recording a release claim.
 The evaluator uses `temperature: 0`, `stream: false`, and `keep_alive: 0` so a
-run is reproducible and does not leave a model resident unnecessarily.
+run is reproducible and does not leave a model resident unnecessarily. For
+Qwen 3-family models it also sends `think: false`, matching Moof's MCP answer
+path rather than counting hidden reasoning output as the user-facing answer.
 
 ## Safety and interpretation
 
@@ -81,7 +83,7 @@ model was pulled or created there:
 | iMac `deanhowe/moof-laravel:latest` | 4/6 (67%) | version honesty, nested binding scope, policy, and queued job passed at 64 tokens |
 | DadsPC `qwen3-coder:30b` | unavailable | Ollama HTTP 500: out-of-memory allocating a 12.7 GB CUDA-host buffer |
 | DadsPC `deepcoder:14b` | 2/6 (33%) | form request and policy checks passed; the other four failed at 64 tokens |
-| DadsPC `qwen3.5:latest` | 0/6 | all six checks failed at 64 tokens |
+| DadsPC `qwen3.5:latest` | 2/6 (33%) | version honesty and queued job passed at 64 tokens with Qwen thinking disabled |
 
 Moof therefore keeps the named `laravel` route on the iMac curated model. A
 future DadsPC route needs a successful model-load health check and a fresh

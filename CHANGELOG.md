@@ -9,6 +9,8 @@ All notable Warrior releases are recorded here.
   replacing the stable model when the bounded score does not improve.
 - Record a local-fleet comparison so an installed but unloadable or weaker
   DadsPC model is not promoted by name alone.
+- Make the evaluator disable hidden Qwen 3-family thinking, matching Moof's
+  MCP path and preventing false benchmark failures.
 - Add `warrior-laravel eval`, a bounded loopback-only Ollama benchmark that
   records model digest, timing, token counters, and explicit Laravel idiom
   checks without pulling models or mutating projects; cap generated tokens so

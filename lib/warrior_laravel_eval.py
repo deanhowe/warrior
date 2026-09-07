@@ -192,22 +192,23 @@ def evaluate(
     started = time.monotonic()
     for case in selected:
         case_started = time.monotonic()
-        generated = _request_json(
-            host,
-            "/api/generate",
-            {
-                "model": model,
-                "prompt": case["prompt"],
-                "stream": False,
-                "keep_alive": 0,
-                "options": {
-                    "temperature": 0,
-                    "num_predict": max_tokens,
-                    "num_ctx": context_tokens,
-                },
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": case["prompt"],
+            "stream": False,
+            "keep_alive": 0,
+            "options": {
+                "temperature": 0,
+                "num_predict": max_tokens,
+                "num_ctx": context_tokens,
             },
-            timeout,
-        )
+        }
+        # Qwen 3-family models emit a hidden reasoning stream by default.
+        # The evaluator measures the answer a caller receives, so keep the
+        # deliberate thinking mode off just as Moof's MCP does for Qwen 3.5.
+        if model.casefold().startswith(("qwen3", "qwen3.5")):
+            payload["think"] = False
+        generated = _request_json(host, "/api/generate", payload, timeout)
         response = generated.get("response")
         if not isinstance(response, str):
             raise RuntimeError(f"Ollama benchmark {case['id']} returned no text")

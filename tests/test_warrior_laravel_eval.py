@@ -64,6 +64,22 @@ class LaravelEvalUnitTests(unittest.TestCase):
         self.assertEqual(calls[2][1]["options"]["num_predict"], 64)
         self.assertEqual(calls[2][1]["options"]["num_ctx"], 4096)
 
+    def test_qwen3_disables_hidden_thinking_for_answer_measurement(self):
+        responses = {
+            "/api/show": {"details": {"family": "qwen3"}},
+            "/api/tags": {"models": [{"name": "qwen3.5:latest", "digest": "sha256:qwen3"}]},
+            "/api/generate": {"response": "scopeBindings()"},
+        }
+
+        def fake_request(host: str, path: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+            return responses[path]
+
+        with patch("warrior_laravel_eval._request_json", side_effect=fake_request) as request:
+            benchmark = [item for item in BENCHMARKS if item["id"] == "nested-binding-scope"]
+            evaluate(model="qwen3.5:latest", max_tasks=1, benchmarks=benchmark)
+
+        self.assertFalse(request.call_args_list[-1].args[2]["think"])
+
     def test_cli_rejects_zero_tasks_without_contacting_ollama(self):
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "eval", "--max-tasks", "0", "--json"],
