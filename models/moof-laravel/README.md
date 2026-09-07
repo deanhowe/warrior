@@ -60,6 +60,39 @@ controller" - imprecise (it's a dedicated request/validation class, not a
 controller). A 7B model under tight constraints will blur related concepts
 sometimes. Expect that, verify anything that matters.
 
+## Concrete Laravel idioms, added and verified (2026-09-07)
+
+The original system prompt only stated general principles ("prefer Laravel's
+own idioms," "don't fabricate APIs"). It didn't actually tell the model what
+those idioms *are*. We added a list of ten concrete, checkable conventions -
+form requests, API resources, policies, route model binding, Eloquent
+relationship naming, polymorphic pivots, queued jobs, Pest test structure -
+each one verified against real Laravel source before being written in, not
+assumed from memory.
+
+That verification step caught a real fabrication. A larger model
+(`gpt-oss:120b`, run via Ollama Cloud) was asked to draft the idiom list and
+came back with a plausible-sounding but fake API: a static
+`Route::scopedBindings()` call. Grepping the actual installed Laravel 13
+framework source
+(`vendor/laravel/framework/src/Illuminate/Routing/Route.php`) showed the real
+method is `scopeBindings()` - an instance method called on a route or route
+group, not a static `Route::` call, and spelled without the extra "d". The
+idiom list ships with the corrected version, and the mistake itself is
+written into the prompt as a named example of exactly the kind of error this
+model is instructed not to make.
+
+**Re-tested after rebuilding**, asked directly "How do I scope nested route
+model bindings to their parent in Laravel? Give the exact method name.":
+
+> "To scope nested route model bindings to their parent in Laravel, you
+> should call the `scopeBindings()` method on the route group... `Route::
+> prefix('posts')->middleware('auth')->group(function () { Route::get('{post}',
+> ...)->scopeBindings(); ... });`"
+
+Correct method name, correct usage pattern, no fabricated static call. That's
+the property this update was for.
+
 ## Why this is broadly portable, not tied to one tool
 
 Ollama exposes `moof-laravel` through its native API *and* a genuine
