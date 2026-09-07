@@ -80,6 +80,7 @@ Thirteen tools in `bin/`, all read-only, additive, or plan-first:
 | `warrior-upstream` | Proves a vendored source relationship from a manifest: exact commit, byte-identical files, renames, declared adaptations, omissions, and undeclared drift—without fetching or updating anything |
 | `warrior-project` | Builds a read-only import dossier, then turns current dirty state into a pinned checkpoint closure plan with one verdict per repository, sensitive names withheld, and no automatic checkpoint writes |
 | `warrior-laravel` | Builds a bounded Laravel/PHP evidence dossier: Composer identity, framework signals, tenancy, broadcasting, tests, frontend markers, and protected boundaries without reading secrets or dependency trees |
+| `warrior-laravel eval` | Runs a bounded, local-only Laravel behaviour benchmark against Ollama, records model identity/digest and token timing, and fails on known fabricated idioms without writing to a project |
 
 `hooks/pre-push-preservation` is the matching Git-side guard. It reads the
 actual local and remote ref pairs Git supplies on stdin, allows new and
@@ -116,6 +117,12 @@ not a blanket claim. See `docs/JOURNEY.md` for the full guided path.
 
 Five skills in `skills/preservation/` bring this discipline into an agent
 session directly — see `skills/preservation/README.md`.
+
+`warrior-laravel eval` is the inexpensive feedback loop for the bundled
+`moof-laravel` model. It measures verified prompts; it does not fine-tune
+weights or imply that a passing score makes a small local model a substitute
+for a frontier model. See
+[`docs/LARAVEL-MODEL-EVALUATION.md`](docs/LARAVEL-MODEL-EVALUATION.md).
 
 ### Engineering and productivity — real practice, not vibes
 

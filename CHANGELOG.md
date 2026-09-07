@@ -4,6 +4,10 @@ All notable Warrior releases are recorded here.
 
 ## Unreleased
 
+- Add `warrior-laravel eval`, a bounded loopback-only Ollama benchmark that
+  records model digest, timing, token counters, and explicit Laravel idiom
+  checks without pulling models or mutating projects; cap generated tokens so
+  an open-ended prompt cannot turn a cheap probe into an unbounded run.
 - Add portable Guardian, Wayfinder, and lease-bound Builder contracts with
   native Kiro, Claude, Copilot, and Codex profiles.
 - Add `warrior-agents`, a zero-credit native validator and plan-first installer
