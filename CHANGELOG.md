@@ -11,6 +11,8 @@ All notable Warrior releases are recorded here.
   DadsPC model is not promoted by name alone.
 - Make the evaluator disable hidden Qwen 3-family thinking, matching Moof's
   MCP path and preventing false benchmark failures.
+- Add explicit `compact` and `standard` evaluator profiles so response-budget
+  results are comparable without making a long run the default.
 - Add `warrior-laravel eval`, a bounded loopback-only Ollama benchmark that
   records model digest, timing, token counters, and explicit Laravel idiom
   checks without pulling models or mutating projects; cap generated tokens so

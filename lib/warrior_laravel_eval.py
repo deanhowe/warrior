@@ -23,6 +23,10 @@ DEFAULT_MODEL = "deanhowe/moof-laravel:latest"
 MAX_RESPONSE_CHARS = 12_000
 DEFAULT_MAX_TOKENS = 64
 DEFAULT_CONTEXT_TOKENS = 4096
+PROFILES: dict[str, dict[str, int]] = {
+    "compact": {"max_tokens": DEFAULT_MAX_TOKENS, "context_tokens": DEFAULT_CONTEXT_TOKENS},
+    "standard": {"max_tokens": 192, "context_tokens": 8192},
+}
 
 
 # Each ``required`` entry is an alternative group: one term from every group
@@ -158,13 +162,19 @@ def evaluate(
     *,
     max_tasks: int | None = None,
     timeout: float = 120.0,
-    max_tokens: int = DEFAULT_MAX_TOKENS,
-    context_tokens: int = DEFAULT_CONTEXT_TOKENS,
+    profile: str = "compact",
+    max_tokens: int | None = None,
+    context_tokens: int | None = None,
     allow_network: bool = False,
     benchmarks: Iterable[dict[str, Any]] = BENCHMARKS,
 ) -> dict[str, Any]:
     """Run a bounded benchmark and return a JSON-safe evidence report."""
     validate_target(host, model, allow_network=allow_network)
+    if profile not in PROFILES:
+        raise ValueError(f"unknown profile {profile!r}; choose one of {sorted(PROFILES)}")
+    selected_profile = PROFILES[profile]
+    max_tokens = selected_profile["max_tokens"] if max_tokens is None else max_tokens
+    context_tokens = selected_profile["context_tokens"] if context_tokens is None else context_tokens
     selected = list(benchmarks)
     if max_tasks is not None:
         if max_tasks < 1:
@@ -248,6 +258,7 @@ def evaluate(
             "elapsed_ms": round((time.monotonic() - started) * 1000),
             "max_tokens": max_tokens,
             "context_tokens": context_tokens,
+            "profile": profile,
         },
         "safety": [
             "No model pull, project file write, Git operation, or framework command is invoked.",

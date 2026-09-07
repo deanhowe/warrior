@@ -10,6 +10,7 @@ The default is the local iMac Ollama server and the curated model:
 
 ```bash
 warrior-laravel eval --max-tasks 3
+warrior-laravel eval --profile standard --max-tasks 3
 warrior-laravel eval --json > ~/Desktop/warrior-laravel-eval.json
 ```
 
@@ -20,10 +21,11 @@ Form Requests, policies, queued jobs, and Pest structure. The nested-binding
 check also fails if the known fabricated `Route::scopedBindings()` spelling
 appears.
 
-`--max-tasks`, `--max-tokens`, and `--context-tokens` are the cost and time
-controls. The evaluator caps each response at 64 generated tokens and each
-request at a 4096-token context by default, so an open-ended model cannot run
-away with the machine. Start with one or three tasks when
+`--profile compact` is the default (64 generated tokens, 4096-token context).
+`--profile standard` raises the bounded budget to 192 generated tokens and
+8192 context tokens for a more realistic answer check. `--max-tokens` and
+`--context-tokens` explicitly override either profile. These are the cost and
+time controls, so an open-ended model cannot run away with the machine. Start with one or three tasks when
 iterating on a Modelfile, then run all six before recording a release claim.
 The evaluator uses `temperature: 0`, `stream: false`, and `keep_alive: 0` so a
 run is reproducible and does not leave a model resident unnecessarily. For
@@ -71,6 +73,16 @@ the candidate still scored **0/2** on the two short-answer cases because the
 responses were truncated before all required terms. The candidate has not been
 promoted to `:latest`. This is an honest response-budget limitation, not a
 claim of training or general Laravel competence.
+
+## Standard-profile smoke result (2026-09-07)
+
+The first bounded three-task run with the new `standard` profile used the same
+stable iMac digest (`84b14d7d8c690d06d2f483c379abab1335534fce32996c7c8b10fb98e14ee552`)
+with 192 generated tokens and an 8192-token context. It scored **2/3 (67%)**:
+version honesty and nested binding scope passed; the Form Request answer still
+failed its explicit shape check. This is useful evidence that the larger budget
+helps some answers, but it is not a release claim and does not justify replacing
+the compact default or changing the model tag.
 
 ## Local fleet comparison (2026-09-07)
 

@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 from warrior_laravel_eval import (  # noqa: E402
     BENCHMARKS,
     DEFAULT_MODEL,
+    PROFILES,
     _check_response,
     evaluate,
     validate_target,
@@ -79,6 +80,30 @@ class LaravelEvalUnitTests(unittest.TestCase):
             evaluate(model="qwen3.5:latest", max_tasks=1, benchmarks=benchmark)
 
         self.assertFalse(request.call_args_list[-1].args[2]["think"])
+
+    def test_named_profile_supplies_bounded_defaults_and_is_reported(self):
+        responses = {
+            "/api/show": {"details": {"family": "qwen2"}},
+            "/api/tags": {"models": [{"name": DEFAULT_MODEL, "digest": "sha256:profile"}]},
+            "/api/generate": {"response": "scopeBindings()"},
+        }
+
+        def fake_request(host: str, path: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+            return responses[path]
+
+        with patch("warrior_laravel_eval._request_json", side_effect=fake_request) as request:
+            benchmark = [item for item in BENCHMARKS if item["id"] == "nested-binding-scope"]
+            report = evaluate(profile="standard", max_tasks=1, benchmarks=benchmark)
+
+        self.assertEqual(PROFILES["standard"], {"max_tokens": 192, "context_tokens": 8192})
+        self.assertEqual(report["summary"]["profile"], "standard")
+        payload = request.call_args_list[-1].args[2]
+        self.assertEqual(payload["options"]["num_predict"], 192)
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
+
+    def test_unknown_profile_is_rejected_before_ollama(self):
+        with self.assertRaises(ValueError):
+            evaluate(profile="unbounded")
 
     def test_cli_rejects_zero_tasks_without_contacting_ollama(self):
         result = subprocess.run(

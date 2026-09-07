@@ -13,7 +13,7 @@ if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 
 from warrior_laravel import build_dossier  # noqa: E402
-from warrior_laravel_eval import DEFAULT_CONTEXT_TOKENS, DEFAULT_HOST, DEFAULT_MAX_TOKENS, DEFAULT_MODEL, evaluate, human  # noqa: E402
+from warrior_laravel_eval import DEFAULT_HOST, DEFAULT_MODEL, PROFILES, evaluate, human  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -27,8 +27,9 @@ def _parser() -> argparse.ArgumentParser:
     evaluation.add_argument("--host", default=DEFAULT_HOST)
     evaluation.add_argument("--max-tasks", type=int, default=None)
     evaluation.add_argument("--timeout", type=float, default=120.0)
-    evaluation.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
-    evaluation.add_argument("--context-tokens", type=int, default=DEFAULT_CONTEXT_TOKENS)
+    evaluation.add_argument("--profile", choices=sorted(PROFILES), default="compact", help="bounded answer budget (default: compact)")
+    evaluation.add_argument("--max-tokens", type=int, default=None, help="override the selected profile's output budget")
+    evaluation.add_argument("--context-tokens", type=int, default=None, help="override the selected profile's context budget")
     evaluation.add_argument("--allow-network", action="store_true", help="permit an explicitly chosen non-loopback host")
     evaluation.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     return parser
@@ -59,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
                 host=args.host,
                 max_tasks=args.max_tasks,
                 timeout=args.timeout,
+                profile=args.profile,
                 max_tokens=args.max_tokens,
                 context_tokens=args.context_tokens,
                 allow_network=args.allow_network,
