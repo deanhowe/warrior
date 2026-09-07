@@ -70,6 +70,23 @@ responses were truncated before all required terms. The candidate has not been
 promoted to `:latest`. This is an honest response-budget limitation, not a
 claim of training or general Laravel competence.
 
+## Local fleet comparison (2026-09-07)
+
+The same six checks were used to test other already-installed local models;
+the evaluator was explicitly allowed to use DadsPC's LAN endpoint, but no
+model was pulled or created there:
+
+| Endpoint/model | Result | Evidence |
+|---|---:|---|
+| iMac `deanhowe/moof-laravel:latest` | 4/6 (67%) | version honesty, nested binding scope, policy, and queued job passed at 64 tokens |
+| DadsPC `qwen3-coder:30b` | unavailable | Ollama HTTP 500: out-of-memory allocating a 12.7 GB CUDA-host buffer |
+| DadsPC `deepcoder:14b` | 2/6 (33%) | form request and policy checks passed; the other four failed at 64 tokens |
+| DadsPC `qwen3.5:latest` | 0/6 | all six checks failed at 64 tokens |
+
+Moof therefore keeps the named `laravel` route on the iMac curated model. A
+future DadsPC route needs a successful model-load health check and a fresh
+benchmark result; an installed model name alone is not sufficient evidence.
+
 ## Improving the model without pretending to train it
 
 Use failed checks as evidence. Update the system prompt or add a verified

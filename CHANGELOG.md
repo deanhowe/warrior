@@ -7,6 +7,8 @@ All notable Warrior releases are recorded here.
 - Tighten the local `moof-laravel` system prompt with compact, executable
   Form Request and Pest answer shapes; evaluate candidate tags without
   replacing the stable model when the bounded score does not improve.
+- Record a local-fleet comparison so an installed but unloadable or weaker
+  DadsPC model is not promoted by name alone.
 - Add `warrior-laravel eval`, a bounded loopback-only Ollama benchmark that
   records model digest, timing, token counters, and explicit Laravel idiom
   checks without pulling models or mutating projects; cap generated tokens so
