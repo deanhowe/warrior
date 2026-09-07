@@ -13,6 +13,8 @@ All notable Warrior releases are recorded here.
   MCP path and preventing false benchmark failures.
 - Add explicit `compact` and `standard` evaluator profiles so response-budget
   results are comparable without making a long run the default.
+- Record the first full six-check `standard` run (4/6 at the stable iMac
+  digest) and keep it opt-in because each CPU prompt takes roughly a minute.
 - Add `warrior-laravel eval`, a bounded loopback-only Ollama benchmark that
   records model digest, timing, token counters, and explicit Laravel idiom
   checks without pulling models or mutating projects; cap generated tokens so

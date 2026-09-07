@@ -84,6 +84,12 @@ failed its explicit shape check. This is useful evidence that the larger budget
 helps some answers, but it is not a release claim and does not justify replacing
 the compact default or changing the model tag.
 
+The subsequent full six-check standard run against the same digest scored
+**4/6 (67%)**: version honesty, nested binding scope, authorization policy, and
+queued jobs passed; Form Request and Pest still failed. Each prompt took roughly
+49–76 seconds on the iMac CPU, so `standard` remains an opt-in diagnostic rather
+than the default release gate.
+
 ## Local fleet comparison (2026-09-07)
 
 The same six checks were used to test other already-installed local models;
