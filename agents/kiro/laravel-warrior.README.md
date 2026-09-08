@@ -119,6 +119,41 @@ and `rtk` isn't installed at all (command-not-found vs. Kiro's own hook
 error handling). Test this deliberately in a low-stakes session before
 relying on it — don't assume it fails open.
 
+## `warrior-laravel doctor` — fresh-clone test-environment checks
+
+A real, tested (`tests/test_warrior_laravel_doctor.py`, run via `pytest`)
+read-only diagnostic, added after a multi-hour live debugging session turned
+up the same pattern three times: a failing test suite on a fresh clone was
+never an application bug, it was one of three environment gaps. Rule 15 in
+`laravel-warrior.json` tells the agent to run this first, before touching
+app code, whenever tests fail on what looks like a fresh or freshly-changed
+environment:
+
+```bash
+# from anywhere inside your project (warrior's bin/ needs to be on PATH,
+# or call it by full path: python3 /path/to/warrior/bin/warrior-laravel doctor .)
+warrior-laravel doctor .
+```
+
+It checks, without ever reading or printing a value from `.env` (only
+whether a given key is *present*):
+
+- **DB connection drift** — a multi-connection app (tenant/landlord/testing
+  split) where one connection's host/port env var was overridden in `.env`
+  and a sibling's wasn't, so it silently stays on a stale coded default.
+- **Vite manifest missing** — a Blade layout calls `@vite(...)` but
+  `public/build/manifest.json` doesn't exist, meaning the frontend was never
+  built (`npm install && npm run build`).
+- **Multitenancy dynamic-database provisioning** — an informational note
+  when `spatie/laravel-multitenancy` is present alongside
+  `ensureDatabaseExists`/`CREATE DATABASE` in factories or migrations: the DB
+  user needs global `CREATE`/`DROP`, not grants scoped to named databases.
+
+If `warrior-laravel` isn't on `PATH` (e.g. this warrior clone isn't
+installed on the target machine), the agent's prompt has the same three
+checks spelled out to do by hand — the tool is a shortcut, not a
+requirement.
+
 ## Design note
 
 This agent intentionally answers from bare Laravel idioms and whatever
