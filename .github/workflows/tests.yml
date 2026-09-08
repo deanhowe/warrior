@@ -1,0 +1,26 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test dependencies
+        run: python3 -m pip install --upgrade pip pytest
+      - name: Run the real test suite
+        run: python3 -m pytest -q
+      - name: Validate every Kiro agent JSON is real JSON, not just kiro-cli-approved
+        run: |
+          set -euo pipefail
+          for f in agents/kiro/*.json; do
+            echo "Validating $f"
+            python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$f"
+          done

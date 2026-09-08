@@ -177,6 +177,30 @@ installed on the target machine), the agent's prompt has the same three
 checks spelled out to do by hand — the tool is a shortcut, not a
 requirement.
 
+## Also available for GitHub Copilot CLI
+
+This agent is ported to Copilot CLI's own custom-agent format at
+`agents/copilot/laravel-warrior.agent.md` (a `.agent.md` file with YAML
+frontmatter, per
+[Copilot's documented schema](https://docs.github.com/en/copilot/reference/custom-agents-configuration)).
+Install it the same way as Warrior's other Copilot agents — copy it to
+`.github/agents/` in the target project (repo-shared) or `~/.copilot/agents/`
+(personal), then `copilot --agent=laravel-warrior`.
+
+The two files are hand-kept in sync, not code-generated — Kiro-specific
+mechanisms (the `knowledge` tool, `todo`/`thinking`/`delegate`) don't exist
+in Copilot CLI and had to be honestly rewritten, not blindly copied.
+`.github/workflows/copilot-agent-sync.yml` runs GitHub Copilot CLI itself,
+headlessly, on every PR touching either file, and asks it to judge whether
+the two are still substantively in sync — catching drift the way a human
+reviewer would, since a plain diff can't tell "reworded for a different
+harness" apart from "rule silently dropped." Real cost: GitHub Actions
+minutes are free on this public repo; Copilot CLI usage bills against
+whatever Copilot plan owns the token in `COPILOT_CLI_TOKEN` (a fine-grained
+PAT with the "Copilot Requests" permission — see the comment at the top of
+that workflow file for exact setup steps; this is the one piece only a
+human with GitHub UI access can do).
+
 ## Design note
 
 This agent intentionally answers from bare Laravel idioms and whatever

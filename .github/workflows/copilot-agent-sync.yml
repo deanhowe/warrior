@@ -1,0 +1,77 @@
+name: copilot-agent-sync
+
+# "Two birds, one stone": this exercises GitHub Copilot CLI for real (headless,
+# in CI) AND uses it to catch drift between our canonical Kiro agent and its
+# hand-ported Copilot-native sibling, since Copilot itself is the one that can
+# actually read and judge whether a prose translation is still faithful.
+#
+# Setup Dean needs to do once (nothing in this repo can do this step):
+#   1. Create a fine-grained personal access token at
+#      https://github.com/settings/personal-access-tokens/new
+#      - Resource owner: your personal account (not an org)
+#      - Repository access: this repo (or public repos) is enough
+#      - Account permissions -> "Copilot Requests": Read-only
+#   2. Add it as a repo secret named COPILOT_CLI_TOKEN
+#      (Settings -> Secrets and variables -> Actions -> New repository secret)
+# Until that secret exists, this workflow will fail at the auth step, loudly,
+# rather than silently no-op — that's intentional so the gap is visible.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "agents/kiro/laravel-warrior.json"
+      - "agents/copilot/laravel-warrior.agent.md"
+
+jobs:
+  check-sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install GitHub Copilot CLI
+        run: npm install -g @github/copilot
+      - name: Ask Copilot to judge whether the two agents are still in sync
+        id: check
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_CLI_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${COPILOT_GITHUB_TOKEN:-}" ]; then
+            echo "::error::COPILOT_CLI_TOKEN secret is not set — see the setup comment at the top of this workflow file."
+            exit 1
+          fi
+          copilot -p "$(cat <<'PROMPT'
+          Compare these two files:
+          - agents/kiro/laravel-warrior.json (the "prompt" field is the canonical rules)
+          - agents/copilot/laravel-warrior.agent.md (a hand-ported translation for GitHub
+            Copilot CLI's own agent format — it necessarily rewrites Kiro-specific tool
+            names like `knowledge`/`todo`/`thinking`/`delegate` into harness-neutral
+            prose, so wording will differ; that is expected, not drift)
+
+          Read both files. Judge only whether the SUBSTANCE of every numbered rule in
+          the Kiro file is still present, in intent, somewhere in the Copilot file — not
+          whether the wording matches. Ignore frontmatter and the closing sentence about
+          what model/harness the agent runs on.
+
+          Reply with exactly one of these two forms, nothing else:
+          SYNC_OK
+          or
+          SYNC_DRIFT: <one sentence per missing or contradicted rule, citing the rule number>
+          PROMPT
+          )" \
+            -s \
+            --model=claude-sonnet-4.6 \
+            --allow-tool='read' \
+            --no-ask-user > copilot-output.txt
+          cat copilot-output.txt
+          if grep -q '^SYNC_OK' copilot-output.txt; then
+            echo "in sync"
+            exit 0
+          fi
+          echo "::error::laravel-warrior.json and laravel-warrior.agent.md have drifted — see Copilot's report above."
+          exit 1
