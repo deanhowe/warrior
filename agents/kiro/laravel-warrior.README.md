@@ -33,7 +33,13 @@ the global one, if you only want it available there.
 
 If the target project has [Laravel Boost](https://github.com/laravel/boost)
 installed, its MCP server gives real tools (`search-docs`, `database-schema`,
-`tinker`, `record-rule`, etc.) that beat guessing at Laravel internals. The
+`tinker`, `record-rule`, etc.) that beat guessing at Laravel internals.
+**Boost only registers `boost:mcp` when the app has a real `.env` with an
+`APP_KEY`** — without one, Laravel defaults toward production and Boost
+deliberately stays silent (confirmed live: `php artisan boost:mcp` failed
+with "no commands defined in the boost namespace" in an otherwise-correct
+project that was simply missing `.env`). If Boost seems unavailable, check
+`.env`/`APP_KEY` exist before suspecting the MCP wiring itself. The
 prompt tells the agent to look for a tool whose name contains "boost" — but
 **Kiro's `tools`/`allowedTools` arrays require an exact server name**, and
 that name is not standardised. In one real project on this machine it's
@@ -42,6 +48,55 @@ registered as `laravel-boost-local`; Boost's own docs describe the default as
 Kiro to list its own available tools once a session is open) and add the
 exact name to this file's `tools` array as `"@<real-name>"` if you want Boost
 tools available without the agent needing to discover them mid-session.
+
+## PHP language server — real code navigation, not just grep
+
+Adding `@php-lsp` (with `definition`/`references`/`hover`/`diagnostics`
+auto-approved, `edit_file`/`rename_symbol` gated behind approval like
+`fs_write`) gives the agent real symbol-level navigation instead of relying
+on text search for everything. This uses
+[`mcp-language-server`](https://github.com/isaacphi/mcp-language-server) — a
+generic, public LSP-to-MCP bridge, not anything Moof-specific — pointed at
+[Intelephense](https://intelephense.com/), a standard PHP language server.
+
+Setup on macOS:
+
+```bash
+# 1. Intelephense (the actual PHP language server)
+npm install -g intelephense
+
+# 2. mcp-language-server (the generic bridge, works with any LSP)
+go install github.com/isaacphi/mcp-language-server@latest
+```
+
+Two real macOS gotchas, hit and confirmed on this machine, not theoretical:
+
+- **`go install` puts the binary in `$(go env GOPATH)/bin`, which is not on
+  `PATH` by default.** Add it: `export PATH="$(go env GOPATH)/bin:$PATH"` in
+  your shell profile. If `mcp-language-server` isn't found when Kiro tries to
+  launch it, this is almost certainly why — confirmed live, `which
+  mcp-language-server` returned nothing until this was added.
+- **If you manage Node via `nvm`, `npm install -g` installs into whichever
+  Node version is currently active**, and switching versions later can hide
+  the binary again even though it's still on disk. A Homebrew-installed
+  Node avoids this; with `nvm`, either pin the version you installed
+  Intelephense under, or reinstall it after switching.
+
+Add this to the target project's `.kiro/settings/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "php-lsp": {
+      "command": "mcp-language-server",
+      "args": ["-workspace", ".", "-lsp", "intelephense", "--", "--stdio"]
+    }
+  }
+}
+```
+
+First run indexes the whole project and can take a couple of minutes on a
+large codebase — this is Intelephense building its index, not a hang.
 
 ## RTK — the one real setup step, and why it's needed
 
