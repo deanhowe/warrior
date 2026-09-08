@@ -59,7 +59,10 @@ def validate_source(harness: str, role: str) -> list[str]:
             problems.append("Builder fs_write must require approval")
     elif harness == "codex":
         try:
-            import tomllib
+            try:
+                import tomllib
+            except ModuleNotFoundError:
+                import tomli as tomllib  # Python < 3.11 backport
             payload = tomllib.loads(text)
         except (ImportError, ValueError) as error:
             return [f"invalid TOML: {error}"]
