@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""Read-only health report for a Git-backed AI knowledge source.
+"""Health report and fast-forward-only publisher for a Git-backed AI knowledge source.
 
-This is deliberately forge- and harness-neutral. It verifies authored source;
-it does not enable a native unit, publish, build embeddings, or trust an index.
+This is deliberately forge- and harness-neutral: it never enables a native
+unit, builds embeddings, or trusts an index, and `--publish` never force-
+pushes or rewrites anything - it refuses whenever the remote head is not an
+ancestor of local HEAD. It does not know whether your fork's native
+Knowledge/Wiki/Goals-style unit is enabled, because that check is inherently
+fork-specific (see docs/engineering/extending-gitea-native-units.md, and
+moof-knowledge's own native_enabled() for a worked, Gitea-SQLite-specific
+example of that half). Run this tool first; wire in your own fork's
+unit-enabled check on top of it if you need one.
 """
 
 from __future__ import annotations
@@ -87,13 +94,82 @@ def inspect(source: Path, remote: str) -> dict[str, Any]:
     }
 
 
+def _is_ancestor(repo: Path, ancestor: str, of_ref: str = "HEAD") -> bool | None:
+    """True if `ancestor` is reachable from `of_ref` (a safe fast-forward).
+
+    Uses `rev-list` rather than `merge-base --is-ancestor` because the latter
+    is not on Warrior's git allowlist (assert_safe_git) - deliberately kept
+    that way rather than widening a shared safety module for one caller.
+    Returns None if the check itself could not be performed.
+    """
+    code, out, _ = git(repo, "rev-list", of_ref)
+    if code != 0:
+        return None
+    return ancestor in out.splitlines()
+
+
+def publish(source: Path, remote: str, branch: str | None = None) -> dict[str, Any]:
+    """Push local knowledge to `remote`, fast-forward only, then re-verify.
+
+    Deliberately does not touch anything fork-specific (no DB lookups, no
+    "is the native unit enabled" check - see docs/engineering/
+    extending-gitea-native-units.md and moof-knowledge's own native_enabled()
+    for that worked example, which cannot be generalised without assuming a
+    specific fork's schema).
+    """
+    report = inspect(source, remote)
+    allowed_before_publish = {"local HEAD differs from remote default branch"}
+    blocking = [error for error in report["errors"] if error not in allowed_before_publish]
+    if blocking:
+        return {"ok": False, "action": "refused", "errors": blocking}
+
+    target_branch = branch or report.get("branch") or report.get("remote_default_branch")
+    if not target_branch:
+        return {"ok": False, "action": "refused", "errors": ["cannot determine which branch to publish"]}
+
+    head = report.get("head")
+    remote_head = report.get("remote_head")
+    if remote_head and head and remote_head == head:
+        return {"ok": True, "action": "already_published", "head": head}
+
+    if remote_head:
+        ancestor_ok = _is_ancestor(source, remote_head)
+        if ancestor_ok is None:
+            return {"ok": False, "action": "refused", "errors": ["could not verify remote head is an ancestor of local HEAD"]}
+        if not ancestor_ok:
+            return {"ok": False, "action": "refused", "errors": ["remote head is not an ancestor of local HEAD - not a fast-forward, refusing to push"]}
+
+    code, _, err = git(source, "push", remote, target_branch)
+    if code != 0:
+        return {"ok": False, "action": "push_failed", "errors": [err.strip()]}
+
+    after = inspect(source, remote)
+    return {"ok": after["healthy"], "action": "published", "report": after}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path, help="Git-backed knowledge source")
     parser.add_argument("--remote", default="origin")
+    parser.add_argument("--publish", action="store_true", help="push if healthy and fast-forward-only; otherwise only inspect")
+    parser.add_argument("--branch", help="branch to publish (default: current branch, or remote's)")
     parser.add_argument("--json", action="store_true")
     arguments = parser.parse_args()
-    report = inspect(arguments.source.expanduser().resolve(), arguments.remote)
+    source = arguments.source.expanduser().resolve()
+
+    if arguments.publish:
+        result = publish(source, arguments.remote, arguments.branch)
+        if arguments.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print("Warrior Knowledge publish: " + result["action"])
+            for error in result.get("errors", []):
+                print(f"  - {error}")
+            if result.get("head"):
+                print(f"  head: {result['head']}")
+        return 0 if result.get("ok") else 1
+
+    report = inspect(source, arguments.remote)
     if arguments.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:

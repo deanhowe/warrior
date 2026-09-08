@@ -45,6 +45,85 @@ class WarriorKnowledgeTest(unittest.TestCase):
         self.assertFalse(report["healthy"])
         self.assertIn("does not exist", report["errors"][0])
 
+    def test_publish_refuses_on_blocking_errors_without_touching_git(self):
+        unhealthy = {"healthy": False, "errors": ["knowledge source has uncommitted content"]}
+        with patch.object(MODULE, "inspect", return_value=unhealthy), \
+             patch.object(MODULE, "git") as git_mock:
+            result = MODULE.publish(Path("/tmp/source"), "origin")
+        self.assertEqual(result["action"], "refused")
+        self.assertFalse(result["ok"])
+        git_mock.assert_not_called()
+
+    def test_publish_is_a_noop_when_already_in_sync(self):
+        in_sync = {
+            "healthy": True, "errors": [], "branch": "master",
+            "head": "abc123", "remote_head": "abc123", "remote_default_branch": "master",
+        }
+        with patch.object(MODULE, "inspect", return_value=in_sync), \
+             patch.object(MODULE, "git") as git_mock:
+            result = MODULE.publish(Path("/tmp/source"), "origin")
+        self.assertEqual(result, {"ok": True, "action": "already_published", "head": "abc123"})
+        git_mock.assert_not_called()
+
+    def test_publish_refuses_a_real_divergence_and_never_pushes(self):
+        diverged = {
+            "healthy": True,
+            "errors": ["local HEAD differs from remote default branch"],
+            "branch": "master", "head": "local123",
+            "remote_head": "remote999", "remote_default_branch": "master",
+        }
+        with patch.object(MODULE, "inspect", return_value=diverged), \
+             patch.object(MODULE, "_is_ancestor", return_value=False), \
+             patch.object(MODULE, "git") as git_mock:
+            result = MODULE.publish(Path("/tmp/source"), "origin")
+        self.assertEqual(result["action"], "refused")
+        self.assertFalse(result["ok"])
+        self.assertIn("not a fast-forward", result["errors"][0])
+        git_mock.assert_not_called()
+
+    def test_publish_pushes_on_a_real_fast_forward_and_reverifies(self):
+        ahead = {
+            "healthy": True,
+            "errors": ["local HEAD differs from remote default branch"],
+            "branch": "master", "head": "local123",
+            "remote_head": "remote999", "remote_default_branch": "master",
+        }
+        after = {**ahead, "healthy": True, "errors": [], "remote_head": "local123"}
+        with patch.object(MODULE, "inspect", side_effect=[ahead, after]), \
+             patch.object(MODULE, "_is_ancestor", return_value=True), \
+             patch.object(MODULE, "git", return_value=(0, "", "")) as git_mock:
+            result = MODULE.publish(Path("/tmp/source"), "origin")
+        self.assertEqual(result["action"], "published")
+        self.assertTrue(result["ok"])
+        git_mock.assert_called_once_with(Path("/tmp/source"), "push", "origin", "master")
+
+    def test_publish_reports_a_real_push_failure(self):
+        ahead = {
+            "healthy": True,
+            "errors": ["local HEAD differs from remote default branch"],
+            "branch": "master", "head": "local123",
+            "remote_head": "remote999", "remote_default_branch": "master",
+        }
+        with patch.object(MODULE, "inspect", return_value=ahead), \
+             patch.object(MODULE, "_is_ancestor", return_value=True), \
+             patch.object(MODULE, "git", return_value=(1, "", "remote: permission denied")):
+            result = MODULE.publish(Path("/tmp/source"), "origin")
+        self.assertEqual(result["action"], "push_failed")
+        self.assertFalse(result["ok"])
+        self.assertIn("permission denied", result["errors"][0])
+
+    def test_is_ancestor_true_when_commit_reachable_from_head(self):
+        with patch.object(MODULE, "git", return_value=(0, "aaa\nbbb\nccc", "")):
+            self.assertTrue(MODULE._is_ancestor(Path("/tmp/source"), "bbb"))
+
+    def test_is_ancestor_false_when_commit_not_reachable(self):
+        with patch.object(MODULE, "git", return_value=(0, "aaa\nbbb", "")):
+            self.assertFalse(MODULE._is_ancestor(Path("/tmp/source"), "zzz"))
+
+    def test_is_ancestor_none_when_rev_list_fails(self):
+        with patch.object(MODULE, "git", return_value=(1, "", "fatal: bad revision")):
+            self.assertIsNone(MODULE._is_ancestor(Path("/tmp/source"), "bbb"))
+
 
 if __name__ == "__main__":
     unittest.main()
