@@ -50,6 +50,59 @@ file) and got useless results back. The correct pattern, also confirmed live:
 `grep -n` the symbol first to get its real line, then call the LSP tool at
 that exact position. Never skip the grep step.
 
+## Laravel Boost, verified against v2.7.1 source (2026-09-08)
+
+Read from the actual installed package (`vendor/laravel/boost/src/Mcp/`),
+not assumed from a plausible-sounding docs skim — and cross-checked against
+the real published docs at laravel.com/docs/boost, which turned out to lag
+the installed version by at least one tool.
+
+**Real, default-enabled MCP tools** (kebab-case names are
+`Str::kebab(class_basename($tool))`, confirmed via
+`Laravel\Mcp\Server\Primitive::name()` — no `#[Name]` overrides exist on any
+Boost tool): `search-docs`, `application-info`, `database-schema`,
+`database-query`, `database-connections`, `browser-logs`, `last-error`,
+`read-log-entries`, `get-absolute-url`, `record-rule`.
+
+**`tinker` is real but off by default** — its class exists
+(`Tinker.php`) but `shouldRegister()` returns
+`config('boost.tinker_tool_enabled', false)`. This is why it's absent from
+the official docs' tool table even though the source ships it: it's opt-in,
+presumably for blast-radius reasons (arbitrary PHP execution). Never assume
+it's available just because a boost-named MCP server exists — check the
+live tool list, or fall back to a real `php artisan tinker --execute=`
+shell call.
+
+**`record-rule`'s real schema has three required params, not two**:
+`glob`, `title`, `note` — all required (confirmed in `RecordRule.php`'s
+`schema()`). A rule recorded with only a glob and a note will be rejected;
+this was wrong in an earlier version of this very file.
+
+**`.ai/rules/index.md` is a real, documented, load-bearing mechanism**, not
+personal-knowledge boilerplate: Boost's project-rules system stores rules
+as markdown files under `.ai/rules/`, each with YAML frontmatter declaring
+the path globs it applies to, and maintains an `index.md` mapping globs to
+files. Laravel's own docs state plainly: "Agents are instructed to consult
+this index before planning or editing any file, so a rule is only loaded
+when it is relevant." This is separate from `record-rule`'s target (same
+directory, but the AGENT-facing consumption side) and from a Kiro agent's
+own personal `knowledge` tool (session-scoped, not shared/committed).
+
+**`infer-conventions` is a real Boost skill**, not a guess — it sweeps an
+existing codebase across a checklist (validation, controllers,
+authorization, models, architecture, testing, frontend, database, console)
+and proposes rules from what the code actually does, skipping framework
+defaults and anything Pint/Rector already enforce. For a years-old
+application with no `.ai/rules` yet, this is the right way to bootstrap —
+not re-deriving the same conventions by hand every session.
+
+**Guidelines vs. skills, precisely**: guidelines (`AGENTS.md`/`CLAUDE.md`
+etc.) load upfront and are broad/foundational; skills
+(`livewire-development`, `pest-testing`, `infer-conventions`, and any
+project's own `.ai/skills/*/SKILL.md`) activate on-demand for a specific
+task. Neither describes *your* application's own conventions — that's what
+project rules (`.ai/rules/`) are for.
+
 ## Laravel Boost silently disappears without a real `.env`
 
 If `php artisan boost:mcp` reports "no commands defined in the boost

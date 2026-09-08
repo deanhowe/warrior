@@ -32,22 +32,45 @@ the global one, if you only want it available there.
 ## Laravel Boost — optional, name varies per project
 
 If the target project has [Laravel Boost](https://github.com/laravel/boost)
-installed, its MCP server gives real tools (`search-docs`, `database-schema`,
-`tinker`, `record-rule`, etc.) that beat guessing at Laravel internals.
-**Boost only registers `boost:mcp` when the app has a real `.env` with an
-`APP_KEY`** — without one, Laravel defaults toward production and Boost
-deliberately stays silent (confirmed live: `php artisan boost:mcp` failed
-with "no commands defined in the boost namespace" in an otherwise-correct
-project that was simply missing `.env`). If Boost seems unavailable, check
-`.env`/`APP_KEY` exist before suspecting the MCP wiring itself. The
-prompt tells the agent to look for a tool whose name contains "boost" — but
-**Kiro's `tools`/`allowedTools` arrays require an exact server name**, and
-that name is not standardised. In one real project on this machine it's
-registered as `laravel-boost-local`; Boost's own docs describe the default as
-`laravel-boost`. Check the target project's `.kiro/settings/mcp.json` (or ask
-Kiro to list its own available tools once a session is open) and add the
-exact name to this file's `tools` array as `"@<real-name>"` if you want Boost
-tools available without the agent needing to discover them mid-session.
+installed, its MCP server gives real tools that beat guessing at Laravel
+internals. **Boost only registers `boost:mcp` when the app has a real
+`.env` with an `APP_KEY`** — without one, Laravel defaults toward
+production and Boost deliberately stays silent (confirmed live: `php
+artisan boost:mcp` failed with "no commands defined in the boost namespace"
+in an otherwise-correct project that was simply missing `.env`). If Boost
+seems unavailable, check `.env`/`APP_KEY` exist before suspecting the MCP
+wiring itself. The prompt tells the agent to look for a tool whose name
+contains "boost" — but **Kiro's `tools`/`allowedTools` arrays require an
+exact server name**, and that name is not standardised. In one real project
+on this machine it's registered as `laravel-boost-local`; Boost's own docs
+describe the default as `laravel-boost`. Check the target project's
+`.kiro/settings/mcp.json` (or ask Kiro to list its own available tools once
+a session is open) and add the exact name to this file's `tools` array as
+`"@<real-name>"` if you want Boost tools available without the agent
+needing to discover them mid-session.
+
+**The real tool list**, verified against `laravel/boost` v2.7.1 source on
+2026-09-08 (the [official docs](https://laravel.com/docs/boost) lag the
+installed version by at least one tool, so source beat docs here):
+`search-docs`, `application-info`, `database-schema`, `database-query`,
+`database-connections`, `browser-logs`, `last-error`, `read-log-entries`,
+`get-absolute-url`, `record-rule` — all registered by default. `tinker`
+exists in source but is **off by default**
+(`config('boost.tinker_tool_enabled', false)`); don't assume it's there
+just because Boost is installed.
+
+**`.ai/rules/index.md` — a real mechanism worth using deliberately.**
+Boost's project-rules system (separate from Kiro's own per-agent
+`knowledge` store) files recorded rules under `.ai/rules/*.md` with
+path-glob frontmatter, and maintains an index mapping globs to files.
+Laravel's docs are explicit that agents should read this index before
+planning or editing any file. `record-rule`'s real schema needs three
+required params — `glob`, `title`, `note` — not two; an earlier version of
+this agent's prompt only knew about two of them. For an established
+codebase with no `.ai/rules` yet, Boost ships an `infer-conventions` skill
+that sweeps existing code and proposes rules from what it actually finds —
+the right way to bootstrap, rather than re-deriving the same conventions by
+hand every session.
 
 ## PHP language server — real code navigation, not just grep
 
