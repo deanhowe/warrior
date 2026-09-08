@@ -14,7 +14,9 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install test dependencies
-        run: python3 -m pip install --upgrade pip pytest
+        run: |
+          python3 -m pip install --upgrade pip pytest
+          brew install git-filter-repo
       - name: Run the real test suite
         run: python3 -m pytest -q
       - name: Validate every Kiro agent JSON is real JSON, not just kiro-cli-approved
