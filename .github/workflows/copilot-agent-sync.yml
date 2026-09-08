@@ -15,6 +15,22 @@ name: copilot-agent-sync
 #      (Settings -> Secrets and variables -> Actions -> New repository secret)
 # Until that secret exists, this workflow will fail at the auth step, loudly,
 # rather than silently no-op — that's intentional so the gap is visible.
+#
+# Security posture, verified against this repo's actual live settings and
+# GitHub's documented behavior (not assumed):
+#   - Trigger is `pull_request`, never `pull_request_target` - the second one
+#     is the genuinely dangerous trigger GitHub's own hardening docs warn
+#     about (it runs with base-repo secrets against untrusted fork code).
+#   - GitHub withholds repository secrets from any pull_request-triggered run
+#     originating from a fork by default; this repo has not overridden that.
+#     A stranger's fork PR touching these files would see COPILOT_CLI_TOKEN
+#     as empty even without the job-level `if` below.
+#   - The `if` below is explicit, defense-in-depth belt-and-braces on top of
+#     that default: it skips the job entirely — no checkout, no npm install,
+#     no attempt to run Copilot — for anything that isn't a same-repo PR (i.e.
+#     opened by Dean or another writer, not a fork) or a manual dispatch.
+#     This also avoids showing a confusing failing check on a good-faith
+#     outside contributor's PR.
 
 on:
   workflow_dispatch:
@@ -25,6 +41,7 @@ on:
 
 jobs:
   check-sync:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -67,7 +84,8 @@ jobs:
             -s \
             --model=claude-sonnet-4.6 \
             --allow-tool='read' \
-            --no-ask-user > copilot-output.txt
+            --no-ask-user \
+            --secret-env-vars=COPILOT_GITHUB_TOKEN > copilot-output.txt
           cat copilot-output.txt
           if grep -q '^SYNC_OK' copilot-output.txt; then
             echo "in sync"
