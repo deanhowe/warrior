@@ -67,6 +67,20 @@
         "timeout_ms": 5000,
         "max_output_size": 4096,
         "cache_ttl_seconds": 0
+      },
+      {
+        "matcher": "shell",
+        "command": "warrior-diagnostics-gate",
+        "timeout_ms": 5000,
+        "max_output_size": 4096,
+        "cache_ttl_seconds": 0
+      },
+      {
+        "matcher": "@php-lsp",
+        "command": "warrior-diagnostics-gate",
+        "timeout_ms": 5000,
+        "max_output_size": 4096,
+        "cache_ttl_seconds": 0
       }
     ]
   },

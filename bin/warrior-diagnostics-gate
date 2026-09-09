@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Kiro CLI preToolUse hook: enforce running php-lsp diagnostics after an edit.
+
+Reads a single Kiro hook JSON payload from stdin (`hook_event_name`,
+`session_id`, `tool_name`, `tool_input`). Exits 0 to allow the tool call,
+2 (with a message on stderr) to reject it - the same contract as the
+existing `rtk hook kiro` preToolUse hook this pairs with. See
+lib/warrior_diagnostics_gate.py for why this exists and how it decides.
+
+Wire it in as an additional preToolUse entry alongside the rtk hook:
+    "hooks": {
+        "preToolUse": [
+            {"matcher": "shell", "command": "rtk hook kiro", ...},
+            {"matcher": "shell", "command": "warrior-diagnostics-gate", ...},
+            {"matcher": "@php-lsp", "command": "warrior-diagnostics-gate", ...}
+        ]
+    }
+Both matchers point at the same command: the payload's own `tool_name`
+field is what this script actually branches on, not the matcher.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+LIB = Path(__file__).resolve().parent.parent / "lib"
+if str(LIB) not in sys.path:
+    sys.path.insert(0, str(LIB))
+
+from warrior_diagnostics_gate import evaluate  # noqa: E402
+
+
+def main() -> int:
+    raw = sys.stdin.read()
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+
+    exit_code, message = evaluate(payload)
+    if message:
+        print(message, file=sys.stderr)
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

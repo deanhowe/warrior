@@ -50,6 +50,69 @@ file) and got useless results back. The correct pattern, also confirmed live:
 `grep -n` the symbol first to get its real line, then call the LSP tool at
 that exact position. Never skip the grep step.
 
+## Kiro CLI config changes can need a desktop-app restart, not just a new session (verified live, 2026-09-08)
+
+Adding new `preToolUse` hooks to `laravel-warrior.json` and starting a fresh
+ACP session did NOT pick them up - even though this project's own README
+already said "agent configs do not live-reload into a running session" and
+a *new* session should have been enough. Confirmed the config file on disk
+was correct; confirmed a brand-new, never-before-used agent name picked up
+equivalent hooks instantly in the same conditions. The difference: a
+`kiro_cli_desktop` background process (`ps aux | grep kiro`) had been
+running since long before the hooks were added and had apparently already
+resolved/cached "laravel-warrior" by name. `kiro-cli restart` (its own
+documented command - not a raw `pkill`) restarted that background process;
+the identical hook then fired correctly on the very next session. If a
+hook or tool change to an agent you've already used this session doesn't
+take effect in a fresh session, restart the desktop app before assuming
+the config itself is wrong.
+
+## `postToolUse` hooks are real but a pure side-channel (verified live, 2026-09-08)
+
+Confirmed via a marker-file test: `postToolUse` hooks DO exist and DO fire
+in this Kiro CLI version (matcher `@php-lsp` fired correctly on an
+`edit_file` call). But unlike `preToolUse` - whose rejection message
+becomes visible, reactable tool-call-failure content the model actually
+sees and responds to - a `postToolUse` hook's own output never reaches the
+model at all; the tool's `rawOutput` after a `postToolUse` hook fires is
+identical to what it would be with no hook present. `postToolUse` is only
+useful for side effects invisible to the agent (external logging, kicking
+off a separate process) - never for injecting a nudge back into the
+model's own reasoning. Anything meant to influence the model's next move
+has to happen through a `preToolUse` block-and-suggest, the same mechanism
+`rtk hook kiro` already proved works.
+
+## A missing hook command fails open, not closed (verified live, 2026-09-08)
+
+Long flagged as unverified (README used to say so explicitly): pointed a
+`preToolUse` hook at a command that doesn't exist anywhere on PATH and
+tried a real tool call. The call completed normally - Kiro CLI does not
+block a tool call just because its hook command itself failed to launch.
+This means it's safe to reference an optional tool (`rtk`,
+`warrior-diagnostics-gate`) in an agent's hooks unconditionally: on a
+machine that doesn't have it installed, the hook silently does nothing
+rather than breaking every matching tool call.
+
+## `warrior-diagnostics-gate`: enforcing rule 11 structurally, not just asking nicely (2026-09-08)
+
+Rule 11 already said, twice, in increasingly explicit wording, to run
+`diagnostics` after any php-lsp edit. Live-tested twice: the agent skipped
+it both times regardless, relying on the test run alone to catch its own
+mistakes (which happened to work, but is slower and misses error classes a
+single test won't exercise). Prompt wording alone hit a real ceiling on a
+cheap model. `bin/warrior-diagnostics-gate` (a `preToolUse` hook, wired
+for both the `shell` and `@php-lsp` matchers) enforces it structurally
+instead: a `@php-lsp/edit_file` or `rename_symbol` call marks the session
+"diagnostics owed"; the next `shell` call that looks like a test run is
+rejected once - exactly the `rtk` hook's own proven block-and-suggest
+pattern - naming `@php-lsp/diagnostics` as the fix; running diagnostics
+clears the flag. Verified live, post the desktop-restart fix above: the
+block fired with the exact intended message, and the agent's own next
+words were "I'll run diagnostics first as required" before actually
+calling it. State is a small per-session JSON file (`tempfile.gettempdir()
+/ "warrior-diagnostics-gate"`), one-shot on block so a model that ignores
+the message once can never hit a permanent deadlock.
+
 ## Rule 6's self-indexing is reliable, but not spontaneous (verified live, 2026-09-08)
 
 Two real, live ACP sessions against `local-starter` (raw wire log inspected,

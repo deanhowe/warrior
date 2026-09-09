@@ -137,10 +137,49 @@ cargo install --git https://github.com/deanhowe/rtk --branch feat/kiro-cli-hook
 rtk init -g --agent kiro-cli
 ```
 
-**Not yet verified**: what happens if this agent's `preToolUse` hook fires
-and `rtk` isn't installed at all (command-not-found vs. Kiro's own hook
-error handling). Test this deliberately in a low-stakes session before
-relying on it — don't assume it fails open.
+**Verified live (2026-09-08)**: a `preToolUse` hook pointed at a command
+that doesn't exist anywhere on PATH does not block the tool call — it
+fails open, the tool runs normally. Confirmed the same for this agent's
+second hook, `warrior-diagnostics-gate` (below). Safe to leave both wired
+in even on a machine that has neither installed.
+
+## `warrior-diagnostics-gate` — enforcing "run diagnostics after an edit," structurally
+
+Rule 11 already told the agent, twice, in increasingly explicit wording,
+to run `diagnostics` after any php-lsp edit. Live-tested twice: it skipped
+that step both times anyway, relying on the test run alone to catch its
+own mistakes. Prompt wording alone hit a real ceiling on a cheap model.
+`bin/warrior-diagnostics-gate` in the `warrior` repo is a `preToolUse` hook
+that enforces it structurally instead, using the exact same block-and-
+suggest mechanism already proven to work for the `rtk` hook: an
+`@php-lsp/edit_file`/`rename_symbol` call marks the session "diagnostics
+owed," and the next `shell` call that looks like a test run is rejected
+once, naming `@php-lsp/diagnostics` as the fix. Verified live: the agent's
+own next words were "I'll run diagnostics first as required" before
+actually calling it. Wire it in alongside the `rtk` hook:
+
+```json
+"hooks": {
+  "preToolUse": [
+    {"matcher": "shell", "command": "rtk hook kiro", "timeout_ms": 5000},
+    {"matcher": "shell", "command": "warrior-diagnostics-gate", "timeout_ms": 5000},
+    {"matcher": "@php-lsp", "command": "warrior-diagnostics-gate", "timeout_ms": 5000}
+  ]
+}
+```
+
+Needs `warrior/bin` on PATH; fails open (does nothing) if it isn't
+installed, per the verified behavior above.
+
+**Kiro CLI config-reload gotcha, verified live**: adding new hooks to an
+agent already used earlier in the same machine session did not take effect
+in a brand-new ACP session — even though a *new* agent name picked up
+equivalent hooks instantly under identical conditions. The cause: a
+`kiro_cli_desktop` background process had already resolved/cached that
+agent name. `kiro-cli restart` (the documented command, not a raw `pkill`)
+fixed it immediately. If a hook or config change doesn't take effect in a
+fresh session, restart the desktop app before assuming the config is
+wrong.
 
 ## `warrior-laravel doctor` — fresh-clone test-environment checks
 
