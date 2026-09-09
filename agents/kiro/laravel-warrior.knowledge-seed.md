@@ -50,6 +50,45 @@ file) and got useless results back. The correct pattern, also confirmed live:
 `grep -n` the symbol first to get its real line, then call the LSP tool at
 that exact position. Never skip the grep step.
 
+## Rule 6's self-indexing is reliable, but not spontaneous (verified live, 2026-09-08)
+
+Two real, live ACP sessions against `local-starter` (raw wire log inspected,
+not the friendly summary) settle this precisely: given a task that didn't
+obviously need memory ("find how Fortify rate-limiting works and run the
+test"), the agent never called `knowledge` at all — no `show`, no self-
+indexing, despite rule 6 saying to do this "at the start of a session."
+Given a task that made the need explicit ("check whatever knowledge you
+have recorded, then summarize"), it correctly called `knowledge` twice
+(show, then a real query) and cross-checked what it found against the
+actual current `phpunit.xml`/`config/database.php`/`.env.example` rather
+than trusting stale notes blindly - matching rule 3's verify-don't-assume
+discipline.
+
+**Conclusion: the self-indexing capability genuinely works; it just isn't
+reliably self-initiated by a cheap model on a task that doesn't obviously
+call for it.** This is a real, measured limitation of running Haiku-cheap,
+not a broken tool wire-up - don't claim "it self-indexes every session"
+without qualifying that it responds correctly when memory is clearly
+relevant, but won't always reach for it unprompted otherwise.
+
+## Everything else, shaken and verified live (2026-09-08)
+
+Same two sessions also confirmed, via the raw ACP wire log:
+- Native tools preferred correctly over shell: `glob`/`grep`/`read`
+  (Directory and Line modes) used for all file discovery; `execute_bash`
+  never touched for anything a native tool could do.
+- Boost actually used as instructed: `@laravel-boost/application-info`
+  called first, then `@laravel-boost/search-docs` with real, well-scoped
+  queries (`"Fortify login rate limiting throttle"`, package-filtered to
+  `laravel/fortify`) before answering a version-specific question - exactly
+  rule 4's order of operations, not assumed from training data.
+- The `rtk hook kiro` preToolUse hook fired for real on a raw
+  `php artisan test ...` shell call, blocked it, and suggested the
+  `rtk`-prefixed form. The agent's very next tool call was the corrected
+  command verbatim, which then ran and reported 3 real, accurate passing
+  tests with real timings - genuine adaptive retry, not a stall or a
+  fabricated "it works" claim.
+
 ## Laravel Boost, verified against v2.7.1 source (2026-09-08)
 
 Read from the actual installed package (`vendor/laravel/boost/src/Mcp/`),
