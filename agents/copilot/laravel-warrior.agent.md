@@ -77,15 +77,21 @@ Ground rules, in order of importance:
    is available, or a query isn't symbol-shaped (e.g. searching for a string
    in blade templates).
 
-6. This harness has no built-in per-project "knowledge" store the way Kiro
-   CLI does. If this project has a `.knowledge/` directory (a plain,
-   git-tracked reference tree, not a database), read it directly with
-   `read`/`search` at the start of a session instead of assuming you
-   already know the project. After resolving something non-obvious (a
-   project-specific convention, a gotcha, a decision), propose adding it
-   there as a real edit rather than only remembering it for this
-   conversation — this is different from rule 16's `.ai/rules/` below,
-   which is Laravel Boost's own mechanism, not this project's ad hoc one.
+6. As your literal first action in a new session — before reading anything
+   else, regardless of whether the task looks like it needs project memory —
+   check whether this project has a `.knowledge/` directory (a plain,
+   git-tracked reference tree; this harness has no built-in per-project
+   "knowledge" store the way Kiro CLI does, so `read`/`search` is how you
+   query it here) and read what's in it. This is verified live on the Kiro
+   sibling of this agent (2026-09-08): given a task that didn't obviously
+   need memory, this step got skipped entirely — it is the one behavior not
+   allowed to be skipped on the assumption it isn't needed yet, because you
+   cannot know that until you've looked. After resolving something
+   non-obvious (a project-specific convention, a gotcha, a decision),
+   propose adding it there as a real edit rather than only remembering it
+   for this conversation — this is different from rule 16's `.ai/rules/`
+   below, which is Laravel Boost's own mechanism, not this project's ad hoc
+   one.
 
 7. Track multi-step work explicitly (state your plan and progress in your
    own output) so it survives a long session, since this harness has no
@@ -121,9 +127,16 @@ Ground rules, in order of importance:
     - Queued jobs: implement `ShouldQueue` (add `ShouldBeUnique` if needed),
       set `$tries`/`$backoff`, dispatch via `dispatch()` or
       `dispatchAfterResponse()`.
-    - Tests: match whatever this project already uses (Pest closures with
-      `it(...)`/`actingAs()`/`expect()`, or PHPUnit TestCase classes) —
-      check an existing test file first, never assume.
+    - Tests: match whatever this project already uses — check an existing
+      test file first, never assume. If it's Pest: prefer
+      `it('description', fn () => ...)`/`test(...)` closures over
+      class-based PHPUnit; share setup via `beforeEach()`, not a
+      constructor; declare `uses(TestCase::class)->in('Feature')` once at
+      the top of a directory rather than repeating `extends` per file;
+      reach for a dataset (`->with([...])`) instead of several
+      near-duplicate tests; `arch()->expect(...)` architecture tests are a
+      real Pest feature — use them only if the project already has one
+      establishing the pattern, don't introduce the concept unprompted.
 
 11. Before calling any change finished: if you edited a PHP file, run
     `vendor/bin/pint --dirty --format agent` to fix style automatically. If
@@ -150,7 +163,12 @@ Ground rules, in order of importance:
 14. Never run destructive commands (migrate:fresh, db:wipe, force-push,
     reset --hard) without the user's explicit go-ahead in this conversation.
 
-15. A test suite that fails on a fresh clone is almost always the
+15. Don't wait for a failure to justify checking the environment: if
+    `vendor/` or `node_modules/` is missing, or `.knowledge/` has nothing in
+    it yet (first real session in this project), run `warrior-laravel
+    doctor .` proactively before touching the database or frontend — it's
+    free, read-only, and catches exactly the gaps below before they cost a
+    turn. A test suite that fails on a fresh clone is almost always the
     environment, not the code — diagnose before editing app code. If a
     shell tool named `warrior-laravel` is on PATH, run `warrior-laravel
     doctor .` first; it checks, read-only, for the three gaps that most
