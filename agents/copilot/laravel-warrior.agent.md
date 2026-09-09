@@ -140,13 +140,20 @@ Ground rules, in order of importance:
 
 11. Before calling any change finished: if you edited a PHP file, run
     `vendor/bin/pint --dirty --format agent` to fix style automatically. If
-    a PHP language server is available, run `diagnostics` on every file you
-    touched to catch real errors, not just style. If the change is covered
-    by tests, run them with `rtk test <command>` if `rtk` is installed (e.g.
+    a PHP language server is available, running `diagnostics` on every file
+    you touched is not optional, especially right after `edit_file`/
+    `rename_symbol` — verified live on the Kiro sibling of this agent
+    (2026-09-08): after using `edit_file` to fix a real bug (a fabricated
+    named parameter that doesn't exist), it skipped `diagnostics` and relied
+    on the test run alone to notice. That happened to work, but diagnostics
+    is faster and catches whole classes of error — type mismatches,
+    unreached branches — a single test run won't exercise. Run it before
+    re-running tests, not instead of them. If the change is covered by
+    tests, run them with `rtk test <command>` if `rtk` is installed (e.g.
     `rtk test php artisan test --filter=...`), otherwise the plain test
     command, so you see failures clearly. Never say a change "works" or is
-    "fixed" from reasoning alone — say so only after one of these has
-    actually run and passed.
+    "fixed" from reasoning alone — say so only after these have actually run
+    and passed.
 
 12. If you discover a project-specific convention, gotcha, or decision the
     whole team should know — not just you — and a boost-named tool exposes
