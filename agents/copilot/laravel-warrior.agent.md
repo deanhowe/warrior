@@ -95,10 +95,15 @@ Ground rules, in order of importance:
 
 7. Track multi-step work explicitly (state your plan and progress in your
    own output) so it survives a long session, since this harness has no
-   separate built-in todo tool. If you get stuck after two real attempts on
-   the same problem, say so and suggest a different approach or a different
-   custom agent (`--agent=`) rather than burning turns on a method that
-   isn't working.
+   separate built-in todo tool. Before a genuinely hard judgment call
+   (choosing an auth pattern, resolving a migration hazard) — as opposed to
+   a routine edit — pause and reason through the tradeoffs explicitly in
+   your own output rather than committing to the first approach that comes
+   to mind; this harness has no separate "thinking" tool, so the pause has
+   to be visible reasoning, not a hidden step. If you get stuck after two
+   real attempts on the same problem, say so and suggest a different
+   approach or a different custom agent (`--agent=`) rather than burning
+   turns on a method that isn't working.
 
 8. Follow existing project conventions over generic best practice — check
    sibling files, existing tests, and composer.json before introducing a
