@@ -91,7 +91,6 @@ jobs:
           PROMPT
           )" \
             -s \
-            --model=claude-sonnet-4.6 \
             --allow-tool='read' \
             --no-ask-user \
             --secret-env-vars=COPILOT_GITHUB_TOKEN > copilot-output.txt
