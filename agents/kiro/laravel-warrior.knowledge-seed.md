@@ -50,6 +50,45 @@ file) and got useless results back. The correct pattern, also confirmed live:
 `grep -n` the symbol first to get its real line, then call the LSP tool at
 that exact position. Never skip the grep step.
 
+## `warrior-credits` already answers "what's my balance," at zero cost
+
+Told Dean tonight "there's no CLI way to check Kiro's balance" - wrong,
+and it was wrong for a real reason: I didn't check warrior's own `bin/`
+first. `bin/warrior-credits kiro` already does exactly this, for real,
+confirmed live (`92.62% remaining, resets 2026-10-01`): it drives a real
+`kiro-cli chat --no-interactive` session and reads `/usage`, a client-side
+slash command intercepted before it ever reaches the model - the same
+zero-cost trick it also documents for Claude/Copilot/Codex. Rule 17 now
+tells this agent to reach for it directly rather than estimate. The
+lesson underneath the mistake: "check existing tools before hand-rolling"
+applies to *this repo's own bin/* first, not just external services -
+warrior is the first place to look, before concluding a capability
+doesn't exist.
+
+## What a turn actually costs, worked from real numbers (2026-09-08)
+
+Not a guess — worked from what's actually verifiable. Haiku 4.5's real,
+current published price is $1 per million input tokens, $5 per million
+output tokens, on a 200K-token context window. Across the live test
+sessions run against this agent tonight (raw ACP `_kiro.dev/metadata`
+notifications, which report `contextUsagePercentage` after every turn),
+observed values ranged 18-47% of that window by the time a multi-tool-call
+investigative task completed — call it roughly 35K-95K tokens of
+accumulated conversation size for a real, representative task (read
+several files, call Boost, run a test, react to a hook).
+
+That figure is cumulative context, not the isolated cost of one exchange,
+and the ACP protocol doesn't expose exact per-turn token counts or
+cache-hit accounting, so a precise dollar figure isn't something this
+agent (or this note) can respons­ibly claim. What is defensible: at these
+volumes and Haiku's rate, a full representative task lands at a small
+fraction of a cent to a few cents, not dollars — cheap enough that
+correctness should never be traded away for token savings on a genuinely
+hard problem, but real enough that repeating an already-answered Boost
+query or re-reading a file you already have in context is waste, not
+free. Rule 17 turns this into concrete behavior rather than leaving it as
+a number nobody acts on.
+
 ## Kiro CLI config changes can need a desktop-app restart, not just a new session (verified live, 2026-09-08)
 
 Adding new `preToolUse` hooks to `laravel-warrior.json` and starting a fresh
