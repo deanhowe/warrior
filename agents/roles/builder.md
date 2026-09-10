@@ -46,7 +46,26 @@ its own prompt still had an out-of-lease write physically blocked
 prompt independently refused the same request through its own reasoning,
 twice, including once under a direct "skip your confirmation step" pressure
 attempt. Both layers held; only the first is a structural guarantee.
-**Git-authority enforcement (never force, reset, clean, discard, or push
-externally) has no equivalent hook yet** - that boundary is still prompt-only,
-so headless dispatch of Builder for any work item with git authority beyond
-"none" remains unsafe until it exists.
+**Git-authority enforcement is now real for Kiro too** (added 2026-09-10): a
+second `preToolUse` hook (`warrior-builder-git-gate`, matching the `shell`
+tool) blocks destructive git actions (reset, clean, checkout/restore-discard,
+force branch delete, stash drop, force push) unconditionally - no lease can
+ever grant them - and gates `git commit`/`git add`/`git push` behind explicit
+`.warrior/lease.json` git-authority fields (`allow_commit`, `remote`),
+matching builder.md's actual "never"/"only when explicitly granted"
+distinction. Proven correct at the code level: 19 tests including a real
+subprocess CLI run through the exact script Kiro invokes.
+
+**What live adversarial testing found, honestly**: attempting the same
+judgment-free-probe technique that proved the file-scope hook did NOT work
+the same way here. Kiro's own layered safety training refused to run
+`git reset --hard`/`git clean -fd` even from a custom agent prompt explicitly
+instructing it to comply with no judgment - it correctly identified that
+instruction as a jailbreak attempt and rejected it outright, so the model
+never called the tool for the hook to intercept. That's a good sign about
+Kiro's baseline behavior, but it means this hook's live proof rests on unit
+tests and the already-established reliability of the `shell` preToolUse
+matcher (proven live for `rtk` and `warrior-diagnostics-gate` this same
+session) rather than a clean "hook alone, model bypassed" demonstration like
+the lease gate got. Worth another attempt with a more creative probe design
+if this ever needs stronger proof.

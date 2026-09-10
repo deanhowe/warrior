@@ -4,6 +4,16 @@ All notable Warrior releases are recorded here.
 
 ## Unreleased
 
+- Add `warrior-builder-git-gate`, a second Kiro `preToolUse` hook that blocks
+  destructive git actions (reset/clean/discard/force-delete/force-push)
+  unconditionally and gates commit/push behind explicit lease grants,
+  completing Builder's structural enforcement alongside the file-scope
+  lease gate. Honestly documented: unlike the file-scope hook, a clean
+  "judgment-free probe" live proof wasn't achievable here - Kiro's own
+  safety training correctly rejected the probe's "comply with no judgment"
+  instruction as a jailbreak attempt before the hook ever got exercised.
+  Proven at the code level instead (19 tests, including a real subprocess
+  CLI run).
 - Add `warrior-builder-lease-gate`, a Kiro `preToolUse` hook that structurally
   enforces Builder's file-scope lease instead of relying on prompt wording
   alone. Verified live: a judgment-free probe agent had an out-of-lease write
