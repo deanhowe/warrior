@@ -35,3 +35,18 @@ Builder must refuse to start unless all of these are supplied and verifiable:
 
 Headless harness queues must keep Builder disabled until those boundaries are
 enforced by the adapter, not merely written into its prompt.
+
+**File-scope enforcement is real for Kiro** (verified live, 2026-09-10): a
+`preToolUse` hook (`warrior-builder-lease-gate`) reads `.warrior/lease.json`
+in the leased worktree and rejects any write outside its `allowed_files`
+list at the adapter level, before the write reaches disk. Proven two ways
+in the same session - a judgment-free probe agent with no scope-awareness in
+its own prompt still had an out-of-lease write physically blocked
+(`[write: failed]`, file confirmed absent afterward), and the real Builder
+prompt independently refused the same request through its own reasoning,
+twice, including once under a direct "skip your confirmation step" pressure
+attempt. Both layers held; only the first is a structural guarantee.
+**Git-authority enforcement (never force, reset, clean, discard, or push
+externally) has no equivalent hook yet** - that boundary is still prompt-only,
+so headless dispatch of Builder for any work item with git authority beyond
+"none" remains unsafe until it exists.

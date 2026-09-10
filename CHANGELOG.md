@@ -4,6 +4,14 @@ All notable Warrior releases are recorded here.
 
 ## Unreleased
 
+- Add `warrior-builder-lease-gate`, a Kiro `preToolUse` hook that structurally
+  enforces Builder's file-scope lease instead of relying on prompt wording
+  alone. Verified live: a judgment-free probe agent had an out-of-lease write
+  physically blocked before reaching disk, and the real Builder prompt
+  independently refused the same request twice through its own reasoning,
+  including under direct social-engineering pressure. Git-authority
+  enforcement (force/reset/clean/discard/external-push) has no equivalent
+  hook yet and remains prompt-only.
 - Tighten the local `moof-laravel` system prompt with compact, executable
   Form Request and Pest answer shapes; evaluate candidate tags without
   replacing the stable model when the bounded score does not improve.

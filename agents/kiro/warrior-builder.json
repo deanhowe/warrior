@@ -12,5 +12,10 @@
     "fs_write": {"requireApproval": "always"},
     "shell": {"autoAllowReadonly": false, "denyByDefault": true}
   },
+  "hooks": {
+    "preToolUse": [
+      {"matcher": "fs_write", "command": "warrior-builder-lease-gate", "timeout_ms": 5000, "max_output_size": 4096, "cache_ttl_seconds": 0}
+    ]
+  },
   "welcomeMessage": "Builder is locked until an exact work item, lease, file allow-list, authority, and checks are supplied."
 }

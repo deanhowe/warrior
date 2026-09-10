@@ -9,7 +9,7 @@ back to the canonical role contracts rather than weakening them.
 |---|---|---|
 | Guardian | preservation and risk gate | read-only; may be dispatched |
 | Wayfinder | evidence-backed decision mapping | read-only; may be dispatched |
-| Builder | one authorised implementation slice | locked until the adapter enforces its lease and exact file scope |
+| Builder | one authorised implementation slice | file scope is adapter-enforced for Kiro (`warrior-builder-lease-gate`, verified live 2026-09-10); still locked for git-authority work until an equivalent hook exists |
 
 The canonical contracts are in `roles/`. Harness projections live in `kiro/`,
 `claude/`, `copilot/`, and `codex/`. Run `warrior-agents validate` after any
