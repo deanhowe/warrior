@@ -240,6 +240,27 @@ PAT with the "Copilot Requests" permission — see the comment at the top of
 that workflow file for exact setup steps; this is the one piece only a
 human with GitHub UI access can do).
 
+## Also available for Claude Code
+
+Ported to Claude Code's own subagent format at
+`agents/claude/laravel-warrior.md` (YAML frontmatter with `name`,
+`description`, `tools`, matching the format Warrior's own
+Guardian/Wayfinder/Builder Claude ports already use). Install it the same
+way — copy to `.claude/agents/` in the target project (repo-shared) or
+`~/.claude/agents/` (personal) — then invoke it via the Agent tool with
+`subagent_type: laravel-warrior`, or as this project's active agent
+depending on how the host session is configured.
+
+Kept in sync by hand with the Kiro and Copilot ports, same discipline as
+the Copilot note above: Kiro-specific mechanisms don't exist here either,
+but Claude Code does have real native equivalents for some of them that
+Copilot CLI lacks — `TodoWrite` for multi-step tracking (rule 7) and the
+`Agent` tool for delegating separable, read-only legwork, both genuine
+capabilities rather than prose workarounds. No automated drift-check
+exists yet for this port the way `copilot-agent-sync.yml` checks the
+Copilot one — a real, open gap, not an oversight to read as "already
+covered."
+
 ## Design note
 
 This agent intentionally answers from bare Laravel idioms and whatever
