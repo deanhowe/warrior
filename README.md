@@ -92,6 +92,14 @@ It never tries to infer force from the remote name or URL.
 Warrior targets macOS Tahoe 26. It is dogfooded and released for that platform;
 cross-platform compatibility is not a project goal.
 
+If you're running Laravel apps locally with [Herd](https://herd.laravel.com/)
+(the common case this platform target implies), Warrior's Laravel-specialist
+agent (`agents/*/laravel-warrior.*`) is built for exactly that setup —
+Herd's `*.test` domains, Sail when a project uses it, Boost's MCP tools when
+present. It's ported for Kiro CLI, Claude Code, and GitHub Copilot CLI. See
+[agents/kiro/laravel-warrior.README.md](agents/kiro/laravel-warrior.README.md)
+for how to install it in your own project.
+
 ### macOS 26 native ML tools (companion repo)
 
 28 Swift CLI tools wrapping Apple's on-device ML frameworks — zero cost, no
